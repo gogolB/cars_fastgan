@@ -29,7 +29,7 @@ This project implements FASTGAN for generating high-quality synthetic CARS micro
 
 ```bash
 # Clone the repository
-git clone <your-repo-url>
+git clone https://github.com/gogolB/cars_fastgan
 cd cars_fastgan
 
 # Install dependencies
