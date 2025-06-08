@@ -1,0 +1,30 @@
+{
+  "Micro_optimal_batch": {
+    "batch_size": 24,
+    "memory_usage": 0.0219573974609375,
+    "samples_per_second": 24.458056753662515,
+    "total_time": 0.9812717437744141
+  },
+  "Standard_optimal_batch": {
+    "batch_size": 8,
+    "memory_usage": 0.02630615234375,
+    "samples_per_second": 19.757821709653143,
+    "total_time": 0.40490293502807617
+  },
+  "Large_optimal_batch": {
+    "batch_size": 4,
+    "memory_usage": 0.045562744140625,
+    "samples_per_second": 8.548155039739212,
+    "total_time": 0.4679372310638428
+  },
+  "optimal_model": {
+    "config_name": "Micro",
+    "ngf": 32,
+    "ndf": 32,
+    "g_layers": 3,
+    "d_layers": 2,
+    "total_params": 270133459,
+    "memory_usage": 0.0138397216796875,
+    "samples_per_second": 49.34337422924948
+  }
+}
