@@ -295,6 +295,7 @@ class FastGANDiscriminator(nn.Module):
     def forward(self, x: torch.Tensor, return_features: bool = False) -> torch.Tensor:
         """Forward pass"""
         features = []
+        original_input = x  # Store original input for multi-scale
         
         # Main discriminator
         for block in self.blocks:
@@ -307,14 +308,13 @@ class FastGANDiscriminator(nn.Module):
         # Multi-scale outputs
         if self.use_multiscale and hasattr(self, 'scale_discriminators'):
             scale_outputs = []
-            current_input = x  # Use the already processed input
             
-            for scale_disc in self.scale_discriminators:
-                # Downsample input for this scale
-                scale_input = F.avg_pool2d(current_input, 2)
+            for i, scale_disc in enumerate(self.scale_discriminators):
+                # Downsample the ORIGINAL input for this scale
+                scale_factor = 2 ** (i + 1)
+                scale_input = F.avg_pool2d(original_input, scale_factor) if scale_factor > 1 else original_input
                 scale_output = scale_disc(scale_input, return_features=False)
                 scale_outputs.append(scale_output)
-                current_input = scale_input
             
             if return_features:
                 return main_output, scale_outputs, features
