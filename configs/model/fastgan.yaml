@@ -1,0 +1,150 @@
+# FASTGAN Model Configuration
+# Optimized for small datasets (100-1000 images)
+
+model_name: "fastgan"
+
+# Generator architecture
+generator:
+  # Base configuration
+  latent_dim: 256
+  ngf: 64  # Number of generator filters
+  n_layers: 4  # Reduced for small dataset
+  
+  # Skip connections (key FASTGAN feature)
+  use_skip_connections: true
+  skip_connection_scale: 0.1
+  
+  # Normalization
+  norm_type: "batch"  # batch, instance, layer, none
+  use_spectral_norm: false
+  
+  # Activation
+  activation: "relu"
+  output_activation: "tanh"
+  
+  # Architecture specific
+  use_self_attention: false  # Can add if needed
+  attention_layers: []
+  
+  # Initialization
+  init_type: "normal"
+  init_gain: 0.02
+
+# Discriminator architecture  
+discriminator:
+  # Base configuration
+  ndf: 64  # Number of discriminator filters
+  n_layers: 3  # Reduced for small dataset
+  
+  # Multi-scale discrimination (FASTGAN feature)
+  use_multiscale: true
+  num_scales: 2
+  
+  # Normalization
+  norm_type: "batch"
+  use_spectral_norm: true  # Helps with training stability
+  
+  # Activation
+  activation: "leaky_relu"
+  leaky_relu_slope: 0.2
+  
+  # Architecture specific
+  use_self_attention: false
+  attention_layers: []
+  
+  # Patch discrimination
+  use_patch_gan: false
+  patch_size: 70
+  
+  # Initialization
+  init_type: "normal"
+  init_gain: 0.02
+
+# Loss configuration
+loss:
+  # GAN loss type
+  gan_loss: "hinge"  # hinge, lsgan, vanilla, wgan
+  
+  # Loss weights
+  adversarial_weight: 1.0
+  feature_matching_weight: 10.0  # Important for FASTGAN
+  
+  # Feature matching
+  use_feature_matching: true
+  feature_layers: [2, 3, 4]  # Which discriminator layers to use
+  
+  # Additional losses
+  use_perceptual_loss: false
+  perceptual_weight: 1.0
+  perceptual_layers: ["conv_4_2"]
+
+# Optimization
+optimizer:
+  # Generator optimizer
+  generator:
+    type: "adam"
+    lr: 0.0002
+    betas: [0.0, 0.999]  # FASTGAN uses beta1=0
+    weight_decay: 0.0
+    
+  # Discriminator optimizer  
+  discriminator:
+    type: "adam"
+    lr: 0.0002
+    betas: [0.0, 0.999]
+    weight_decay: 0.0
+
+# Learning rate scheduling
+scheduler:
+  use_scheduler: false
+  type: "linear"  # linear, step, cosine
+  start_epoch: 100
+  end_epoch: 200
+
+# Training specific
+training:
+  # Update frequencies
+  n_critic: 1  # Discriminator updates per generator update
+  
+  # Gradient penalties
+  use_gradient_penalty: false
+  gradient_penalty_weight: 10.0
+  
+  # Progressive growing (if needed)
+  progressive_growing: false
+  
+  # EMA for generator
+  use_ema: false
+  ema_decay: 0.999
+
+# Architecture variants
+variants:
+  # For very small datasets
+  micro:
+    generator:
+      ngf: 32
+      n_layers: 3
+    discriminator:
+      ndf: 32
+      n_layers: 2
+      
+  # Standard configuration
+  standard:
+    generator:
+      ngf: 64
+      n_layers: 4
+    discriminator:
+      ndf: 64
+      n_layers: 3
+      
+  # For larger compute
+  large:
+    generator:
+      ngf: 128
+      n_layers: 5
+    discriminator:
+      ndf: 128
+      n_layers: 4
+
+# Currently active variant
+active_variant: "standard"

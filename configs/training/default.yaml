@@ -1,0 +1,141 @@
+# Training Configuration for CARS-FASTGAN
+
+# Training parameters
+max_epochs: 1000  # Can train for many epochs with small dataset
+min_epochs: 100
+early_stopping_patience: 200  # High patience for GAN training
+
+# Validation and checkpointing
+val_check_interval: 1.0  # Check every epoch
+check_val_every_n_epoch: 10
+save_last: true
+save_top_k: 3
+
+# Logging intervals
+log_every_n_steps: 10
+log_images_every_n_epochs: 25
+num_sample_images: 16  # Number of images to generate for logging
+
+# Hardware optimization for M2 Mac
+accelerator: "auto"  # Will auto-detect MPS on M2 Mac
+devices: 1
+precision: "32-true"  # Use 32-bit precision for stability
+enable_progress_bar: true
+
+# Memory optimization
+gradient_clip_val: 1.0
+gradient_clip_algorithm: "norm"
+accumulate_grad_batches: 1
+
+# Training stability
+enable_checkpointing: true
+enable_model_summary: true
+detect_anomaly: false  # Set to true for debugging
+
+# Profiling (for optimization)
+profiler: null  # "simple", "advanced", "pytorch", null
+profile_memory: false
+
+# Resume training
+resume_from_checkpoint: null  # Path to checkpoint file
+auto_lr_find: false  # Automatic learning rate finding
+
+# Regularization
+weight_decay: 0.0
+dropout_rate: 0.0
+
+# GAN-specific training settings
+gan_training:
+  # Warm-up strategy
+  warmup_epochs: 10
+  warmup_lr_factor: 0.1
+  
+  # Training balance
+  discriminator_warmup: 5  # Train discriminator first for N epochs
+  generator_skip_threshold: 0.8  # Skip generator if discriminator too weak
+  
+  # Loss monitoring
+  loss_smoothing_window: 100
+  loss_balance_threshold: 0.1
+  
+  # Sample generation during training
+  fixed_noise_size: 64  # Size of fixed noise for consistent samples
+  
+  # Training schedule
+  alternate_training: false  # True for alternating, False for simultaneous
+  
+  # Adaptive training
+  adaptive_lr: false
+  lr_adaptation_window: 50
+  lr_adaptation_factor: 0.5
+
+# Data loading optimization
+dataloader:
+  persistent_workers: true
+  prefetch_factor: 2
+  multiprocessing_context: null  # "spawn" for some systems
+
+# Experiment tracking
+experiment:
+  name: "fastgan_baseline"
+  version: null  # Auto-increment if null
+  tags: ["fastgan", "cars", "microscopy"]
+  
+  # Artifact logging
+  log_model: true
+  log_code: true
+  log_config: true
+
+# Callbacks
+callbacks:
+  # Model checkpointing
+  model_checkpoint:
+    monitor: "val/fid_score"
+    mode: "min"
+    save_top_k: 3
+    filename: "fastgan-{epoch:02d}-{val_fid_score:.2f}"
+    auto_insert_metric_name: false
+  
+  # Early stopping
+  early_stopping:
+    monitor: "val/fid_score"
+    mode: "min"
+    patience: 200
+    min_delta: 0.01
+    
+  # Learning rate monitoring
+  lr_monitor:
+    logging_interval: "epoch"
+    log_momentum: false
+    
+  # Rich progress bar
+  rich_progress_bar:
+    leave: true
+    
+  # Custom callbacks
+  image_generation:
+    enabled: true
+    log_interval: 25  # Log generated images every N epochs
+    num_samples: 16
+    
+  # Model summary
+  model_summary:
+    max_depth: 2
+
+# Optimization flags
+compile_model: false  # PyTorch 2.0 compilation (experimental)
+torch_compile_mode: "default"  # "default", "reduce-overhead", "max-autotune"
+
+# Debugging
+debug:
+  limit_train_batches: null  # Limit batches for debugging
+  limit_val_batches: null
+  limit_test_batches: null
+  overfit_batches: 0.0  # Overfit on small subset for debugging
+  fast_dev_run: false  # Quick run for testing
+  
+# Resource monitoring
+monitor_resources:
+  cpu: true
+  memory: true
+  gpu: false  # M2 Mac doesn't have traditional GPU monitoring

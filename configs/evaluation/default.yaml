@@ -1,0 +1,206 @@
+# Evaluation Configuration for CARS-FASTGAN
+
+# Evaluation settings
+evaluation_name: "fastgan_evaluation"
+output_dir: "outputs/evaluation"
+
+# Metrics to compute
+metrics:
+  # Image quality metrics
+  fid:
+    enabled: true
+    batch_size: 50
+    num_samples: 1000  # More samples = better FID estimation
+    feature_dim: 2048
+    
+  lpips:
+    enabled: true
+    net: "alex"  # alex, vgg, squeeze
+    batch_size: 32
+    num_pairs: 500  # Number of image pairs to compare
+    
+  is_score:
+    enabled: true
+    splits: 10
+    batch_size: 50
+    
+  psnr:
+    enabled: false  # Not meaningful for generated images
+    
+  ssim:
+    enabled: false  # Not meaningful for generated images
+    
+  # Custom medical imaging metrics
+  medical_metrics:
+    enabled: true
+    tissue_similarity: true
+    morphology_analysis: true
+    
+# Sample generation for evaluation
+generation:
+  num_samples: 1000  # Total samples to generate
+  batch_size: 16
+  use_fixed_noise: false
+  save_individual_images: true
+  image_format: "png"
+  
+  # Generation modes
+  modes:
+    random: true  # Random sampling
+    interpolation: true  # Linear interpolation in latent space
+    reconstruction: false  # Not applicable for unconditional GAN
+    
+# Comparison datasets
+comparison:
+  # Compare against real images
+  real_images:
+    enabled: true
+    path: "data/processed"
+    sample_size: 448  # Use all available real images
+    
+  # Compare against other models (if available)
+  baseline_models:
+    enabled: false
+    models: []
+    
+# Visualization settings
+visualization:
+  # Sample grids
+  sample_grid:
+    enabled: true
+    grid_size: [4, 4]  # 4x4 grid
+    num_grids: 5
+    
+  # Interpolation visualization
+  interpolation:
+    enabled: true
+    num_steps: 10
+    num_sequences: 3
+    
+  # Feature space analysis
+  latent_space:
+    enabled: true
+    pca_components: 2
+    tsne_perplexity: 30
+    umap_neighbors: 15
+    
+  # Distribution plots
+  distributions:
+    pixel_intensity: true
+    gradient_magnitude: true
+    frequency_domain: true
+    
+# Analysis settings
+analysis:
+  # Diversity metrics
+  diversity:
+    enabled: true
+    intra_class_distance: true
+    inter_class_distance: false  # No class conditioning
+    
+  # Mode collapse detection
+  mode_collapse:
+    enabled: true
+    clustering_method: "kmeans"
+    num_clusters: 10
+    threshold: 0.1
+    
+  # Feature analysis
+  feature_analysis:
+    enabled: true
+    layer_names: ["conv1", "conv2", "conv3"]
+    activation_maps: true
+    
+# Medical imaging specific evaluation
+medical_evaluation:
+  # Tissue morphology
+  morphology:
+    enabled: true
+    cell_density_analysis: true
+    stromal_pattern_analysis: true
+    texture_analysis: true
+    
+  # Clinical relevance
+  clinical:
+    enabled: false  # Requires expert annotation
+    radiologist_evaluation: false
+    diagnostic_utility: false
+    
+# Statistical analysis
+statistics:
+  # Hypothesis testing
+  statistical_tests:
+    enabled: true
+    ks_test: true  # Kolmogorov-Smirnov test
+    mannwhitney_test: true
+    
+  # Confidence intervals
+  confidence_intervals:
+    enabled: true
+    alpha: 0.05
+    bootstrap_samples: 1000
+    
+# Report generation
+reporting:
+  # Automatic report generation
+  generate_report: true
+  report_format: "html"  # html, pdf, markdown
+  include_plots: true
+  include_statistics: true
+  
+  # Export settings
+  export_metrics: true
+  export_format: "json"  # json, csv, yaml
+  
+# Performance monitoring
+performance:
+  # Generation speed
+  measure_generation_time: true
+  measure_memory_usage: true
+  
+  # Throughput
+  benchmark_batch_sizes: [1, 4, 8, 16]
+  
+# Evaluation schedule
+schedule:
+  # During training evaluation
+  evaluate_during_training: true
+  evaluation_interval: 50  # Every N epochs
+  quick_evaluation: true  # Reduced samples for speed
+  
+  # Post-training evaluation
+  full_evaluation_at_end: true
+  
+# Hardware optimization
+hardware:
+  use_mixed_precision: false
+  optimize_for_inference: true
+  compile_model: false
+  
+# Reproducibility
+reproducibility:
+  set_seed: true
+  seed: 42
+  deterministic: true
+  
+# Advanced settings
+advanced:
+  # Custom evaluation functions
+  custom_metrics: []
+  
+  # External tool integration
+  external_tools:
+    imagej_analysis: false
+    fiji_macros: false
+    
+# Validation thresholds
+thresholds:
+  fid_threshold: 50.0  # Good threshold for medical images
+  lpips_threshold: 0.5
+  is_threshold: 2.0
+  
+  # Quality gates
+  minimum_quality:
+    fid_max: 100.0
+    lpips_max: 0.8
+    diversity_min: 0.3

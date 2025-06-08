@@ -1,0 +1,46 @@
+# Main configuration file for CARS-FASTGAN
+# This file orchestrates all other configs
+
+defaults:
+  - data: cars_dataset
+  - model: fastgan
+  - training: default
+  - evaluation: default
+  - _self_
+
+# Global settings
+project_name: "cars-fastgan"
+experiment_name: "fastgan_baseline"
+seed: 42
+
+# Paths
+data_path: "data/raw"  # Update this to your actual data path
+output_dir: "outputs"
+checkpoint_dir: "experiments/checkpoints"
+log_dir: "experiments/logs"
+
+# Hardware settings
+device: "auto"  # auto, cpu, cuda, mps
+num_workers: 4
+pin_memory: true
+
+# Experiment tracking
+use_wandb: false  # Set to true if you want to use Weights & Biases
+wandb:
+  project: "cars-fastgan"
+  entity: null  # Your wandb username
+  tags: ["fastgan", "cars", "microscopy", "thyroid"]
+
+# Debug settings
+debug: false
+fast_dev_run: false  # For quick testing
+
+# Reproducibility
+deterministic: true
+benchmark: false  # Set to true for consistent input sizes
+
+# Logging
+log_level: "INFO"
+save_top_k: 3  # Number of best checkpoints to keep
+monitor: "fid_score"  # Metric to monitor for checkpointing
+mode: "min"  # min for FID, max for other metrics
