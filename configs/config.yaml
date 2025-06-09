@@ -1,5 +1,4 @@
 # Main configuration file for CARS-FASTGAN
-# This file orchestrates all other configs
 
 defaults:
   - data: cars_dataset
@@ -14,33 +13,96 @@ experiment_name: "fastgan_baseline"
 seed: 42
 
 # Paths
-data_path: "data/raw"  # Update this to your actual data path
+data_path: "data/raw"
 output_dir: "outputs"
 checkpoint_dir: "experiments/checkpoints"
 log_dir: "experiments/logs"
 
 # Hardware settings
-device: "auto"  # auto, cpu, cuda, mps
-num_workers: 4
-pin_memory: true
+device: "auto"
+accelerator: "auto"
+devices: 1
+precision: "32-true"
+
+# Training settings (moved from training config for main.py compatibility)
+max_epochs: 1000
+min_epochs: 1
+val_check_interval: 1.0
+check_val_every_n_epoch: 10
+log_every_n_steps: 50
+log_images_every_n_epochs: 25
+num_sample_images: 16
+
+# Gradient clipping
+gradient_clip_val: 1.0
+gradient_clip_algorithm: "norm"
+accumulate_grad_batches: 1
+
+# Callbacks
+callbacks:
+  model_checkpoint:
+    monitor: "val/d_loss"
+    mode: "min"
+    save_top_k: 3
+    filename: "fastgan-{epoch:04d}-{val_d_loss:.3f}"
+    auto_insert_metric_name: false
+  early_stopping:
+    monitor: "val/d_loss"
+    mode: "min"
+    patience: 200
+    min_delta: 0.001
+  lr_monitor:
+    logging_interval: "epoch"
+    log_momentum: false
+  rich_progress_bar:
+    leave: true
+  model_summary:
+    max_depth: 2
 
 # Experiment tracking
-use_wandb: false  # Set to true if you want to use Weights & Biases
+use_wandb: false
 wandb:
   project: "cars-fastgan"
-  entity: null  # Your wandb username
+  entity: null
   tags: ["fastgan", "cars", "microscopy", "thyroid"]
+  log_model: true
+  offline: false
 
 # Debug settings
-debug: false
-fast_dev_run: false  # For quick testing
+debug:
+  fast_dev_run: false
+  limit_train_batches: null
+  limit_val_batches: null
+  overfit_batches: 0
 
-# Reproducibility
+# Training stability
+enable_checkpointing: true
+enable_model_summary: true
+enable_progress_bar: true
+detect_anomaly: false
 deterministic: true
-benchmark: false  # Set to true for consistent input sizes
+benchmark: false
 
 # Logging
 log_level: "INFO"
-save_top_k: 3  # Number of best checkpoints to keep
-monitor: "fid_score"  # Metric to monitor for checkpointing
-mode: "min"  # min for FID, max for other metrics
+save_last: true
+monitor: "val/d_loss"
+mode: "min"
+
+# Profiling
+profiler: null
+num_sanity_val_steps: 2
+reload_dataloaders_every_n_epochs: 0
+
+# GAN-specific (for compatibility with training configs)
+gan_training:
+  fixed_noise_size: 64
+  warmup_epochs: 10
+  warmup_lr_factor: 0.1
+  discriminator_warmup: 5
+  generator_skip_threshold: 0.8
+  loss_smoothing_window: 100
+  loss_balance_threshold: 0.1
+  adaptive_lr: false
+  lr_adaptation_window: 50
+  lr_adaptation_factor: 0.5

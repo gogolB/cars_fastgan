@@ -3,8 +3,8 @@
 # Dataset parameters
 dataset_name: "cars_microscopy"
 image_size: 512
-channels: 1  # Grayscale
-use_8bit: true  # Will be determined by analysis tool
+channels: 1
+use_8bit: true
 
 # Data splits
 train_ratio: 0.8
@@ -13,57 +13,45 @@ test_ratio: 0.1
 split_seed: 42
 
 # Data loading
-batch_size: 8  # Small batch size for limited dataset and M2 Mac
+batch_size: 8
 num_workers: 4
 pin_memory: true
-drop_last: true  # Important for GAN training
+drop_last: true
+persistent_workers: true
 
 # Augmentation settings
 augment_train: true
 augment_val: false
 augment_test: false
 
-# Augmentation parameters
+# Normalization
+normalize_method: "standard"  # options: standard, minmax, custom
+target_mean: 0.5
+target_std: 0.5
+
+# Performance optimization
+cache_images: false  # Enable for small datasets that fit in memory
+
+# Augmentation parameters (for reference, handled by dataset.py)
 augmentation:
-  # Geometric transforms
   horizontal_flip: 0.5
   vertical_flip: 0.5
   rotation_degrees: 15
   scale_range: [0.9, 1.1]
   translate_percent: 0.1
-  
-  # Intensity transforms
   brightness_factor: 0.1
   contrast_factor: 0.1
   gamma_range: [0.8, 1.2]
-  
-  # Noise and blur
   gaussian_noise_std: 0.02
   gaussian_blur_sigma: [0.1, 1.0]
   gaussian_blur_prob: 0.3
-  
-  # Medical imaging specific
   elastic_transform: true
   elastic_alpha: 100
   elastic_sigma: 10
   elastic_prob: 0.3
-
-# Normalization
-normalize_to_unit_range: true  # [-1, 1] for GAN training
-mean: 0.5
-std: 0.5
 
 # Data validation
 validate_images: true
 min_image_size: 256
 max_image_size: 1024
 allowed_extensions: [".tif", ".tiff", ".png", ".jpg", ".jpeg"]
-
-# Class information (if needed for conditioning)
-classes:
-  healthy: 0
-  cancerous: 1
-  
-# Preprocessing cache
-use_cache: true
-cache_dir: "data/processed/cache"

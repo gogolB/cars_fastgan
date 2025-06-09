@@ -13,8 +13,9 @@ import torchvision
 from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
 from pathlib import Path
+import copy
 
-from ..models.fastgan import FastGAN
+from ..models.fastgan import FastGAN, FastGANGenerator
 from ..evaluation.metrics import FIDScore, LPIPSScore
 
 
@@ -101,6 +102,7 @@ class FastGANModule(pl.LightningModule):
         self.gradient_penalty_weight = gradient_penalty_weight
         
         # EMA for generator
+        self.use_ema = use_ema
         if use_ema:
             self.ema_generator = self._create_ema_model()
             self.ema_decay = ema_decay
@@ -114,26 +116,55 @@ class FastGANModule(pl.LightningModule):
         )
         
         # Evaluation metrics
+        self.compute_fid = compute_fid
+        self.compute_lpips = compute_lpips
+        
         if compute_fid:
-            self.fid_metric = FIDScore()
+            try:
+                self.fid_metric = FIDScore()
+            except ImportError:
+                print("Warning: FID computation requested but pytorch-fid not available")
+                self.compute_fid = False
+                
         if compute_lpips:
-            self.lpips_metric = LPIPSScore()
+            try:
+                self.lpips_metric = LPIPSScore()
+            except ImportError:
+                print("Warning: LPIPS computation requested but lpips not available")
+                self.compute_lpips = False
         
         # Training tracking
         self.automatic_optimization = False  # Manual optimization for GANs
         
-    def _create_ema_model(self):
-        """Create EMA version of generator"""
-        ema_generator = type(self.model.generator)(
-            **self.model.generator.__dict__
+    def _create_ema_model(self) -> FastGANGenerator:
+        """Create EMA version of generator with proper initialization"""
+        # Get the generator's initialization parameters
+        generator = self.model.generator
+        
+        # Create a new generator with the same parameters
+        ema_generator = FastGANGenerator(
+            latent_dim=generator.latent_dim,
+            ngf=generator.ngf,
+            n_layers=generator.n_layers,
+            image_size=generator.image_size,
+            channels=generator.channels,
+            use_skip_connections=generator.use_skip_connections,
+            norm_type=getattr(generator, 'norm_type', 'batch')  # Default to batch if not found
         )
-        ema_generator.load_state_dict(self.model.generator.state_dict())
+        
+        # Copy the state dict
+        ema_generator.load_state_dict(generator.state_dict())
         ema_generator.eval()
+        
+        # Ensure it's on the same device
+        if next(generator.parameters()).is_cuda:
+            ema_generator = ema_generator.cuda()
+        
         return ema_generator
     
     def _update_ema(self):
         """Update EMA generator"""
-        if self.ema_generator is None:
+        if self.ema_generator is None or not self.use_ema:
             return
             
         with torch.no_grad():
@@ -145,8 +176,13 @@ class FastGANModule(pl.LightningModule):
                     param.data, alpha=1 - self.ema_decay
                 )
     
-    def adversarial_loss(self, y_hat: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-        """Compute adversarial loss"""
+    def adversarial_loss(self, y_hat: torch.Tensor, y: bool) -> torch.Tensor:
+        """Compute adversarial loss
+        
+        Args:
+            y_hat: Discriminator predictions
+            y: True for real, False for fake
+        """
         if self.gan_loss == "hinge":
             if y:  # Real
                 return F.relu(1.0 - y_hat).mean()
@@ -158,6 +194,8 @@ class FastGANModule(pl.LightningModule):
         elif self.gan_loss == "vanilla":
             target = torch.ones_like(y_hat) if y else torch.zeros_like(y_hat)
             return F.binary_cross_entropy_with_logits(y_hat, target)
+        elif self.gan_loss == "wgan":
+            return -y_hat.mean() if y else y_hat.mean()
         else:
             raise ValueError(f"Unknown GAN loss: {self.gan_loss}")
     
@@ -181,7 +219,7 @@ class FastGANModule(pl.LightningModule):
         batch_size = real_images.size(0)
         alpha = torch.rand(batch_size, 1, 1, 1, device=self.device)
         
-        interpolated = alpha * real_images + (1 - alpha) * fake_images
+        interpolated = alpha * real_images + (1 - alpha) * fake_images.detach()
         interpolated.requires_grad_(True)
         
         d_interpolated = self.model.discriminator(interpolated)
@@ -209,7 +247,7 @@ class FastGANModule(pl.LightningModule):
         batch_size = real_images.size(0)
         
         # Get optimizers
-        g_opt, d_opt = self.optimizers()
+        opt_g, opt_d = self.optimizers()
         
         # Sample noise
         noise = torch.randn(batch_size, self.hparams.latent_dim, device=self.device)
@@ -218,7 +256,7 @@ class FastGANModule(pl.LightningModule):
         fake_images = self.model.generator(noise)
         
         # Train discriminator
-        d_opt.zero_grad()
+        opt_d.zero_grad()
         
         # Real images
         if self.model.discriminator.use_multiscale:
@@ -226,10 +264,14 @@ class FastGANModule(pl.LightningModule):
                 real_images, return_features=True
             )
         else:
-            real_pred, real_features = self.model.discriminator(
-                real_images, return_features=True
-            )
-            real_scale_preds = []
+            real_output = self.model.discriminator(real_images, return_features=True)
+            if isinstance(real_output, tuple) and len(real_output) == 2:
+                real_pred, real_features = real_output
+                real_scale_preds = []
+            else:
+                real_pred = real_output
+                real_features = []
+                real_scale_preds = []
         
         # Fake images (detached)
         if self.model.discriminator.use_multiscale:
@@ -237,10 +279,14 @@ class FastGANModule(pl.LightningModule):
                 fake_images.detach(), return_features=True
             )
         else:
-            fake_pred, fake_features = self.model.discriminator(
-                fake_images.detach(), return_features=True
-            )
-            fake_scale_preds = []
+            fake_output = self.model.discriminator(fake_images.detach(), return_features=True)
+            if isinstance(fake_output, tuple) and len(fake_output) == 2:
+                fake_pred, fake_features = fake_output
+                fake_scale_preds = []
+            else:
+                fake_pred = fake_output
+                fake_features = []
+                fake_scale_preds = []
         
         # Discriminator loss
         d_loss_real = self.adversarial_loss(real_pred, True)
@@ -256,14 +302,14 @@ class FastGANModule(pl.LightningModule):
         if self.use_gradient_penalty:
             gp = self.gradient_penalty(real_images, fake_images)
             d_loss += self.gradient_penalty_weight * gp
-            self.log("train/gradient_penalty", gp)
+            self.log("train/gradient_penalty", gp, prog_bar=False)
         
         self.manual_backward(d_loss)
-        d_opt.step()
+        opt_d.step()
         
         # Train generator every n_critic steps
         if batch_idx % self.n_critic == 0:
-            g_opt.zero_grad()
+            opt_g.zero_grad()
             
             # Generate new fake images
             if self.model.discriminator.use_multiscale:
@@ -271,45 +317,64 @@ class FastGANModule(pl.LightningModule):
                     fake_images, return_features=True
                 )
             else:
-                fake_pred_g, fake_features_g = self.model.discriminator(
-                    fake_images, return_features=True
-                )
-                fake_scale_preds_g = []
+                fake_output_g = self.model.discriminator(fake_images, return_features=True)
+                if isinstance(fake_output_g, tuple) and len(fake_output_g) == 2:
+                    fake_pred_g, fake_features_g = fake_output_g
+                    fake_scale_preds_g = []
+                else:
+                    fake_pred_g = fake_output_g
+                    fake_features_g = []
+                    fake_scale_preds_g = []
             
             # Generator adversarial loss
-            g_loss_adv = -fake_pred_g.mean()  # Hinge loss for generator
+            if self.gan_loss == "hinge" or self.gan_loss == "wgan":
+                g_loss_adv = -fake_pred_g.mean()
+            else:
+                g_loss_adv = self.adversarial_loss(fake_pred_g, True)
             
             # Multi-scale generator loss
             for fake_scale in fake_scale_preds_g:
-                g_loss_adv += -fake_scale.mean()
+                if self.gan_loss == "hinge" or self.gan_loss == "wgan":
+                    g_loss_adv += -fake_scale.mean()
+                else:
+                    g_loss_adv += self.adversarial_loss(fake_scale, True)
             
             g_loss = self.adversarial_weight * g_loss_adv
             
             # Feature matching loss
-            if self.use_feature_matching:
-                fm_loss = self.feature_matching_loss(fake_features_g, real_features)
-                g_loss += self.feature_matching_weight * fm_loss
-                self.log("train/feature_matching_loss", fm_loss)
+            if self.use_feature_matching and real_features and fake_features_g:
+                # Select only the specified layers for feature matching
+                if self.feature_layers:
+                    real_features_selected = [real_features[i] for i in self.feature_layers if i < len(real_features)]
+                    fake_features_selected = [fake_features_g[i] for i in self.feature_layers if i < len(fake_features_g)]
+                else:
+                    real_features_selected = real_features
+                    fake_features_selected = fake_features_g
+                
+                if real_features_selected and fake_features_selected:
+                    fm_loss = self.feature_matching_loss(fake_features_selected, real_features_selected)
+                    g_loss += self.feature_matching_weight * fm_loss
+                    self.log("train/feature_matching_loss", fm_loss, prog_bar=False)
             
             self.manual_backward(g_loss)
-            g_opt.step()
+            opt_g.step()
             
             # Update EMA
-            if self.ema_generator is not None:
+            if self.use_ema and self.ema_generator is not None:
                 self._update_ema()
             
             # Logging
-            self.log("train/g_loss", g_loss)
-            self.log("train/g_loss_adv", g_loss_adv)
+            self.log("train/g_loss", g_loss, prog_bar=True)
+            self.log("train/g_loss_adv", g_loss_adv, prog_bar=False)
         
         # Logging
-        self.log("train/d_loss", d_loss)
-        self.log("train/d_loss_real", d_loss_real)
-        self.log("train/d_loss_fake", d_loss_fake)
+        self.log("train/d_loss", d_loss, prog_bar=True)
+        self.log("train/d_loss_real", d_loss_real, prog_bar=False)
+        self.log("train/d_loss_fake", d_loss_fake, prog_bar=False)
         
         # Log learning rates
-        self.log("train/lr_g", g_opt.param_groups[0]['lr'])
-        self.log("train/lr_d", d_opt.param_groups[0]['lr'])
+        self.log("train/lr_g", opt_g.param_groups[0]['lr'], prog_bar=False)
+        self.log("train/lr_d", opt_d.param_groups[0]['lr'], prog_bar=False)
     
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         """Validation step"""
@@ -319,7 +384,10 @@ class FastGANModule(pl.LightningModule):
         # Generate fake images
         noise = torch.randn(batch_size, self.hparams.latent_dim, device=self.device)
         with torch.no_grad():
-            fake_images = self.model.generator(noise)
+            if self.use_ema and self.ema_generator is not None:
+                fake_images = self.ema_generator(noise)
+            else:
+                fake_images = self.model.generator(noise)
         
         # Compute discriminator predictions
         real_pred = self.model.discriminator(real_images)
@@ -335,10 +403,13 @@ class FastGANModule(pl.LightningModule):
         val_d_loss_fake = self.adversarial_loss(fake_pred, False)
         val_d_loss = val_d_loss_real + val_d_loss_fake
         
-        val_g_loss = -fake_pred.mean()
+        if self.gan_loss == "hinge" or self.gan_loss == "wgan":
+            val_g_loss = -fake_pred.mean()
+        else:
+            val_g_loss = self.adversarial_loss(fake_pred, True)
         
-        self.log("val/d_loss", val_d_loss)
-        self.log("val/g_loss", val_g_loss)
+        self.log("val/d_loss", val_d_loss, prog_bar=True)
+        self.log("val/g_loss", val_g_loss, prog_bar=False)
         
         return {
             "val_d_loss": val_d_loss,
@@ -356,7 +427,11 @@ class FastGANModule(pl.LightningModule):
         """Log sample images to tensorboard/wandb"""
         with torch.no_grad():
             # Generate samples with fixed noise
-            fake_images = self.model.generator(self.fixed_noise[:16])
+            num_samples = min(16, len(self.fixed_noise))
+            if self.use_ema and self.ema_generator is not None:
+                fake_images = self.ema_generator(self.fixed_noise[:num_samples])
+            else:
+                fake_images = self.model.generator(self.fixed_noise[:num_samples])
             
             # Create grid
             grid = torchvision.utils.make_grid(
@@ -368,11 +443,12 @@ class FastGANModule(pl.LightningModule):
             
             # Log to tensorboard
             if self.logger:
-                self.logger.experiment.add_image(
-                    "generated_images", 
-                    grid, 
-                    self.current_epoch
-                )
+                if hasattr(self.logger, 'experiment'):
+                    self.logger.experiment.add_image(
+                        "generated_images", 
+                        grid, 
+                        self.current_epoch
+                    )
     
     def configure_optimizers(self):
         """Configure optimizers and schedulers"""
@@ -396,10 +472,12 @@ class FastGANModule(pl.LightningModule):
     
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         """Save additional state"""
-        if self.ema_generator is not None:
+        if self.use_ema and self.ema_generator is not None:
             checkpoint['ema_generator_state_dict'] = self.ema_generator.state_dict()
     
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         """Load additional state"""
-        if 'ema_generator_state_dict' in checkpoint and self.ema_generator is not None:
+        if self.use_ema and 'ema_generator_state_dict' in checkpoint:
+            if self.ema_generator is None:
+                self.ema_generator = self._create_ema_model()
             self.ema_generator.load_state_dict(checkpoint['ema_generator_state_dict'])

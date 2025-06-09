@@ -1,417 +1,199 @@
 #!/usr/bin/env python3
 """
-Launch improved CARS-FASTGAN training with fixes for all identified issues
-FIXED VERSION - Addresses bugs in original
+Fixed training launcher using proper Hydra configuration paths
+Compatible with the updated codebase and configuration structure
 """
 
 import os
-import sys
-from pathlib import Path
 import subprocess
-import json
-import yaml
+from pathlib import Path
 from datetime import datetime
-
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent))
+import sys
 
 
-class ImprovedTrainingLauncher:
-    """Launch training with improved configuration based on diagnostic findings"""
+def launch_improved_training(data_path: str, experiment_name: str = None):
+    """Launch training with improved settings using correct config paths"""
     
-    def __init__(self):
-        self.project_root = Path(__file__).parent.parent
-        self.timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        
-        print("🚀 CARS-FASTGAN Improved Training Launcher")
-        print("=" * 60)
-        
-    def create_improved_model_config(self):
-        """Create improved model configuration addressing structural complexity issues"""
-        config = {
-            'model_name': 'fastgan_improved',
-            
-            # Upgrade to standard model for better structural learning
-            'generator': {
-                'latent_dim': 256,
-                'ngf': 64,  # Increased from 32 (micro) to 64 (standard)
-                'n_layers': 4,  # Increased from 3 to 4
-                'image_size': 512,
-                'channels': 1,
-                'use_skip_connections': True,
-                'skip_connection_scale': 0.1,
-                'norm_type': 'batch',
-                'activation': 'relu',
-                'output_activation': 'tanh',
-                'init_type': 'normal',
-                'init_gain': 0.02,
-                
-                # NOTE: Self-attention not implemented in base model
-                # Remove these lines to avoid confusion
-                # 'use_self_attention': True,
-                # 'attention_layers': [2, 3],
-            },
-            
-            'discriminator': {
-                'ndf': 64,  # Increased from 32 to 64
-                'n_layers': 4,  # Increased from 3 to 4 for larger receptive field
-                'image_size': 512,
-                'channels': 1,
-                'use_spectral_norm': True,
-                'norm_type': 'batch',
-                'activation': 'leaky_relu',
-                'leaky_relu_slope': 0.2,
-                # 'use_self_attention': True,  # Not implemented
-                # 'attention_layers': [2],  # Not implemented
-                'use_patch_gan': False,
-                'init_type': 'normal',
-                'init_gain': 0.02,
-                
-                # Multi-scale discrimination
-                'use_multiscale': True,
-                'num_scales': 3,  # Increased from 2 to 3 for better detail capture
-            },
-            
-            'loss': {
-                'gan_loss': 'hinge',
-                'adversarial_weight': 1.0,
-                'feature_matching_weight': 20.0,  # Increased from 10.0
-                'use_feature_matching': True,
-                'feature_layers': [1, 2, 3, 4],  # Use more layers
-                
-                # NOTE: Perceptual loss not implemented in training module
-                # 'use_perceptual_loss': True,
-                # 'perceptual_weight': 5.0,
-                # 'perceptual_layers': ['conv_3_3', 'conv_4_3'],
-            },
-            
-            'optimizer': {
-                'generator': {
-                    'type': 'adam',
-                    'lr': 0.0001,  # Reduced from 0.0002 for stability
-                    'betas': [0.0, 0.999],
-                    'weight_decay': 0.0,
-                },
-                'discriminator': {
-                    'type': 'adam',
-                    'lr': 0.0004,  # 4x generator LR for better balance
-                    'betas': [0.0, 0.999],
-                    'weight_decay': 0.0,
-                }
-            },
-            
-            'scheduler': {
-                'use_scheduler': True,
-                'type': 'linear',
-                'start_epoch': 500,
-                'end_epoch': 1000,
-            },
-            
-            'training': {
-                'n_critic': 1,
-                'use_gradient_penalty': True,  # Enable for stability
-                'gradient_penalty_weight': 10.0,
-                'progressive_growing': False,  # Could enable later
-                'use_ema': True,  # Enable EMA for stability
-                'ema_decay': 0.999,
-            }
-        }
-        
-        # Save config
-        config_path = Path("configs/model/fastgan_improved.yaml")
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
-            
-        print(f"✅ Created improved model config: {config_path}")
-        return config_path
+    if experiment_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        experiment_name = f"cars_fastgan_improved_{timestamp}"
     
-    def create_training_config(self):
-        """Create optimized training configuration"""
-        config = {
-            'max_epochs': 1500,  # Increased for better convergence
-            'min_epochs': 500,
-            'early_stopping_patience': 300,
-            
-            'val_check_interval': 1.0,
-            'check_val_every_n_epoch': 10,
-            'save_last': True,
-            'save_top_k': 5,  # Keep more checkpoints
-            
-            'log_every_n_steps': 10,
-            'log_images_every_n_epochs': 10,  # More frequent image logging
-            'num_sample_images': 16,
-            
-            # Hardware optimization
-            'accelerator': 'auto',
-            'devices': 1,
-            'precision': '32-true',
-            'enable_progress_bar': True,
-            
-            'gradient_clip_val': 1.0,
-            'gradient_clip_algorithm': 'norm',
-            'accumulate_grad_batches': 1,
-            
-            'enable_checkpointing': True,
-            'enable_model_summary': True,
-            'detect_anomaly': False,
-            
-            'gan_training': {
-                'warmup_epochs': 20,  # Increased warmup
-                'warmup_lr_factor': 0.1,
-                'discriminator_warmup': 10,  # Train D first
-                'generator_skip_threshold': 0.8,
-                'loss_smoothing_window': 100,
-                'loss_balance_threshold': 0.1,
-                'fixed_noise_size': 64,
-                'adaptive_lr': True,  # Enable adaptive learning
-                'lr_adaptation_window': 50,
-                'lr_adaptation_factor': 0.5,
-            },
-            
-            'callbacks': {
-                'model_checkpoint': {
-                    'monitor': 'val/fid_score',
-                    'mode': 'min',
-                    'save_top_k': 5,
-                    'filename': 'fastgan-improved-{epoch:02d}-{val_fid_score:.2f}',
-                    'auto_insert_metric_name': False,
-                },
-                'early_stopping': {
-                    'monitor': 'val/fid_score',
-                    'mode': 'min',
-                    'patience': 300,
-                    'min_delta': 0.01,
-                },
-                'lr_monitor': {
-                    'logging_interval': 'epoch',
-                    'log_momentum': False,
-                },
-                'image_generation': {
-                    'enabled': True,
-                    'log_interval': 10,
-                    'num_samples': 16,
-                },
-            }
-        }
-        
-        config_path = Path("configs/training/improved.yaml")
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        
-        with open(config_path, 'w') as f:
-            yaml.dump(config, f, default_flow_style=False)
-            
-        print(f"✅ Created improved training config: {config_path}")
-        return config_path
+    # Absolute path for data
+    data_path = Path(data_path).resolve()
     
-    def create_launch_command(self, fixed_data_path: str, use_wandb: bool = False):
-        """Create the launch command with all improvements"""
+    # Build command with proper Hydra overrides
+    cmd = [
+        "python", "main.py",
+        f"experiment_name={experiment_name}",
+        f"data_path={data_path}",
         
-        experiment_name = f"cars_fastgan_improved_{self.timestamp}"
+        # Data configuration overrides
+        "data.batch_size=16",
+        "data.num_workers=0",  # Mac compatibility
         
-        # Base command - FIX: Use proper Hydra override syntax
-        cmd = [
-            "python", "main.py",
-            f"experiment_name={experiment_name}",
-            f"data_path={fixed_data_path}",
-            
-            # Training settings - FIX: Use correct paths
-            f"max_epochs=1500",
-            f"data.batch_size=16",  # Optimal for standard model on M2
-            
-            # Model parameters - FIX: Correct parameter paths
-            "model.generator.ngf=64",
-            "model.generator.n_layers=4",
-            "model.discriminator.ndf=64", 
-            "model.discriminator.n_layers=4",
-            "model.discriminator.num_scales=3",
-            
-            # Loss parameters
-            "model.loss.feature_matching_weight=20.0",
-            
-            # Optimizer parameters
-            "model.optimizer.generator.lr=0.0001",
-            "model.optimizer.discriminator.lr=0.0004",
-            
-            # Training parameters
-            "model.training.use_gradient_penalty=true",
-            "model.training.use_ema=true",
-            
-            # Logging
-            "log_images_every_n_epochs=10",
-            
-            # Mac-specific fix
-            "data.num_workers=0",  # Important for Mac
-        ]
+        # Model configuration overrides
+        "model.generator.ngf=64",
+        "model.generator.n_layers=4",
+        "model.discriminator.ndf=64",
+        "model.discriminator.n_layers=4",
+        "model.discriminator.num_scales=3",
         
-        if use_wandb:
-            cmd.extend([
-                "use_wandb=true",
-                "wandb.project=cars-fastgan-improved",
-                f"wandb.tags=[improved,fixed_normalization,{self.timestamp}]"
-            ])
-            
-        return cmd
+        # Loss configuration
+        "model.loss.feature_matching_weight=20.0",
+        
+        # Optimizer configuration
+        "model.optimizer.generator.lr=0.0001",
+        "model.optimizer.discriminator.lr=0.0004",
+        
+        # Training configuration
+        "model.training.use_gradient_penalty=true",
+        "model.training.gradient_penalty_weight=10.0",
+        "model.training.use_ema=true",
+        "model.training.ema_decay=0.999",
+        
+        # Main config overrides (training parameters)
+        "max_epochs=1500",
+        "log_images_every_n_epochs=10",
+        
+        # GAN training settings
+        "gan_training.warmup_epochs=20",
+        "gan_training.discriminator_warmup=10",
+    ]
     
-    def create_runpod_script(self, fixed_data_path: str):
-        """Create a script for RunPod deployment with larger model"""
-        script_content = f'''#!/bin/bash
-# RunPod training script for CARS-FASTGAN with large model
-
-# Setup environment
-cd /workspace
-git clone https://github.com/YOUR_USERNAME/cars_fastgan.git
-cd cars_fastgan
-
-# Install dependencies
-pip install -r requirements.txt
-pip install wandb
-
-# Copy data (adjust path as needed)
-# You'll need to upload your fixed data to RunPod first
-cp -r /workspace/data_fixed/* data/
-
-# Login to wandb (optional)
-# wandb login YOUR_API_KEY
-
-# Launch training with large model
-python main.py \\
-    experiment_name=cars_fastgan_large_{self.timestamp} \\
-    data_path=data/processed_fixed \\
-    model.generator.ngf=128 \\
-    model.generator.n_layers=5 \\
-    model.discriminator.ndf=128 \\
-    model.discriminator.n_layers=4 \\
-    model.discriminator.num_scales=3 \\
-    model.loss.feature_matching_weight=20.0 \\
-    model.optimizer.generator.lr=0.0001 \\
-    model.optimizer.discriminator.lr=0.0004 \\
-    model.training.use_gradient_penalty=true \\
-    model.training.use_ema=true \\
-    max_epochs=2000 \\
-    data.batch_size=32 \\
-    accelerator=gpu \\
-    devices=1 \\
-    precision=16-mixed \\
-    data.num_workers=4 \\
-    use_wandb=true \\
-    wandb.project=cars-fastgan-large
-'''
-        
-        script_path = Path("scripts/runpod_training.sh")
-        with open(script_path, 'w') as f:
-            f.write(script_content)
-        script_path.chmod(0o755)
-        
-        print(f"✅ Created RunPod script: {script_path}")
-        return script_path
+    print("🚀 Launching CARS-FASTGAN Training (Fixed v2)")
+    print("=" * 60)
+    print(f"Experiment: {experiment_name}")
+    print(f"Data path: {data_path}")
+    print("\nKey improvements:")
+    print("  - Model: Standard (64 filters, 4 layers)")
+    print("  - Feature matching weight: 20.0 (vs 10.0)")
+    print("  - Learning rates: G=0.0001, D=0.0004")
+    print("  - Gradient penalty: Enabled")
+    print("  - EMA: Enabled")
+    print("  - Epochs: 1500")
+    print("\nCommand:")
+    print(" ".join(cmd[:3]))
+    for c in cmd[3:]:
+        print(f"    {c} \\")
+    print("\n" + "=" * 60)
     
-    def estimate_training_time(self, model_size: str = "standard", epochs: int = 1500):
-        """Estimate training time"""
-        # Based on your micro model: 1000 epochs with 15 iterations/epoch
-        # With 454 images, batch_size=16 -> ~28 iterations/epoch
-        iterations_per_epoch = 28
-        
-        if model_size == "micro":
-            time_per_iteration = 0.5  # seconds
-        elif model_size == "standard":
-            time_per_iteration = 1.0  # seconds
-        else:  # large
-            time_per_iteration = 2.0  # seconds
-            
-        total_seconds = epochs * iterations_per_epoch * time_per_iteration
-        total_hours = total_seconds / 3600
-        
-        if total_hours < 24:
-            return f"~{total_hours:.1f} hours"
-        else:
-            return f"~{total_hours/24:.1f} days"
+    # Change to project directory
+    project_root = Path(__file__).parent.parent
+    os.chdir(project_root)
     
-    def run(self, fixed_data_path: str, launch_local: bool = True, use_wandb: bool = False):
-        """Run the improved training setup"""
-        
-        # Verify fixed data path exists
-        fixed_path = Path(fixed_data_path)
-        if not fixed_path.exists():
-            print(f"❌ Fixed data path not found: {fixed_data_path}")
-            print("Please run fix_normalization_issues.py first!")
-            return
-            
-        # Create improved configs
-        model_config = self.create_improved_model_config()
-        training_config = self.create_training_config()
-        
-        # Create launch command
-        cmd = self.create_launch_command(str(fixed_path.resolve()), use_wandb)
-        
-        # Create RunPod script
-        runpod_script = self.create_runpod_script(str(fixed_path.resolve()))
-        
-        # Estimate time
-        time_estimate = self.estimate_training_time("standard", 1500)
-        
-        print("\n" + "=" * 60)
-        print("📋 Improved Training Configuration Summary:")
-        print(f"  - Model: Standard (64 filters, 4 layers)")
-        print(f"  - Batch size: 16")
-        print(f"  - Epochs: 1500")
-        print(f"  - Learning rate: G=0.0001, D=0.0004")
-        print(f"  - Feature matching weight: 20.0")
-        print(f"  - Gradient penalty: Enabled")
-        print(f"  - EMA: Enabled")
-        print(f"  - Data: {fixed_path}")
-        print(f"  - Estimated time: {time_estimate}")
-        
-        print(f"\n🖥️  Local Training Command:")
-        print("  " + " ".join(cmd[:3]) + " \\")
-        for c in cmd[3:]:
-            print(f"    {c} \\")
-        print()
-        
-        print(f"\n☁️  RunPod Script: {runpod_script}")
-        print("  For RunPod: Upload fixed data first, then run the script")
-        
-        if launch_local:
-            print(f"\n❓ Start local training on Mac? (y/n): ", end="")
-            response = input().strip().lower()
-            
-            if response in ['y', 'yes']:
-                os.chdir(self.project_root)
-                print(f"\n🚀 Starting improved training...")
-                print("=" * 60)
-                
-                try:
-                    subprocess.run(cmd, check=True)
-                    print("\n✅ Training completed successfully!")
-                except subprocess.CalledProcessError as e:
-                    print(f"\n❌ Training failed: {e}")
-                except KeyboardInterrupt:
-                    print("\n⏸️  Training interrupted")
-        else:
-            print("\n✅ Configuration ready for manual launch")
+    try:
+        subprocess.run(cmd, check=True)
+        print("\n✅ Training completed successfully!")
+    except subprocess.CalledProcessError as e:
+        print(f"\n❌ Training failed: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n⏸️  Training interrupted")
+        sys.exit(0)
 
 
-def main():
-    import argparse
+def launch_large_model_training(data_path: str, experiment_name: str = None):
+    """Launch training with large model configuration"""
     
-    parser = argparse.ArgumentParser(description='Launch improved CARS-FASTGAN training')
-    parser.add_argument('--fixed_data_path', type=str, default='data/processed_fixed',
-                       help='Path to fixed data directory')
-    parser.add_argument('--no_launch', action='store_true',
-                       help='Create configs but do not launch training')
-    parser.add_argument('--use_wandb', action='store_true',
-                       help='Enable Weights & Biases logging')
+    if experiment_name is None:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        experiment_name = f"cars_fastgan_large_{timestamp}"
     
-    args = parser.parse_args()
+    # Absolute path for data
+    data_path = Path(data_path).resolve()
     
-    launcher = ImprovedTrainingLauncher()
-    launcher.run(
-        fixed_data_path=args.fixed_data_path,
-        launch_local=not args.no_launch,
-        use_wandb=args.use_wandb
-    )
+    cmd = [
+        "python", "main.py",
+        f"experiment_name={experiment_name}",
+        f"data_path={data_path}",
+        
+        # Data configuration
+        "data.batch_size=8",  # Smaller batch for large model
+        "data.num_workers=0",
+        
+        # Large model configuration
+        "model.generator.ngf=128",
+        "model.generator.n_layers=5",
+        "model.discriminator.ndf=128",
+        "model.discriminator.n_layers=4",
+        "model.discriminator.num_scales=3",
+        
+        # Loss configuration
+        "model.loss.feature_matching_weight=20.0",
+        
+        # Optimizer configuration
+        "model.optimizer.generator.lr=0.0001",
+        "model.optimizer.discriminator.lr=0.0004",
+        
+        # Training configuration
+        "model.training.use_gradient_penalty=true",
+        "model.training.gradient_penalty_weight=10.0",
+        "model.training.use_ema=true",
+        "model.training.ema_decay=0.999",
+        
+        # Training parameters
+        "max_epochs=2000",
+        "log_images_every_n_epochs=10",
+        
+        # GAN training settings
+        "gan_training.warmup_epochs=30",
+        "gan_training.discriminator_warmup=15",
+        
+        # For GPU/RunPod - uncomment these lines
+        # "accelerator=gpu",
+        # "devices=1",
+        # "precision=16-mixed",
+        # "data.num_workers=4",
+    ]
+    
+    print("🚀 Launching CARS-FASTGAN Training (Large Model)")
+    print("=" * 60)
+    print(f"Experiment: {experiment_name}")
+    print(f"Data path: {data_path}")
+    print("\nLarge model configuration:")
+    print("  - Model: Large (128 filters, 5 layers)")
+    print("  - Batch size: 8 (memory consideration)")
+    print("  - Epochs: 2000")
+    print("\n" + "=" * 60)
+    
+    # Change to project directory
+    project_root = Path(__file__).parent.parent
+    os.chdir(project_root)
+    
+    try:
+        subprocess.run(cmd, check=True)
+        print("\n✅ Training completed successfully!")
+    except subprocess.CalledProcessError as e:
+        print(f"\n❌ Training failed: {e}")
+        sys.exit(1)
+    except KeyboardInterrupt:
+        print("\n⏸️  Training interrupted")
+        sys.exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    
+    parser = argparse.ArgumentParser(description='Launch improved CARS-FASTGAN training')
+    parser.add_argument('--data_path', type=str, default='data/processed_enhanced',
+                       help='Path to enhanced data directory')
+    parser.add_argument('--experiment_name', type=str, default=None,
+                       help='Experiment name (auto-generated if not provided)')
+    parser.add_argument('--large_model', action='store_true',
+                       help='Use large model configuration')
+    
+    args = parser.parse_args()
+    
+    # Verify data path exists
+    data_path = Path(args.data_path)
+    if not data_path.exists():
+        print(f"❌ Data path not found: {data_path}")
+        print("\nMake sure you've run the data preparation scripts:")
+        print("1. python scripts/prepare_cars_data_properly.py")
+        print("2. python scripts/enhance_cars_contrast.py")
+        sys.exit(1)
+    
+    if args.large_model:
+        launch_large_model_training(str(data_path), args.experiment_name)
+    else:
+        launch_improved_training(str(data_path), args.experiment_name)
