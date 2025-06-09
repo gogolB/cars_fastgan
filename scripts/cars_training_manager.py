@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-CARS Training Manager - Unified training launcher with optimization and configuration management
+CARS Training Manager - Fixed version with proper improved preset handling
 
 This script replaces:
 - launch_training.py
@@ -9,17 +9,17 @@ This script replaces:
 - optimize_for_m2.py (optimization features)
 
 Usage:
-    # Launch training with auto-optimization
-    python cars_training_manager.py --data_path data/processed --auto_optimize
+    # Launch training with improved preset
+    python cars_training_manager_fixed.py --preset improved --data_path data/processed
     
     # Launch with specific configuration
-    python cars_training_manager.py --data_path data/processed --model_size standard --batch_size 16
+    python cars_training_manager_fixed.py --data_path data/processed --model_size standard --batch_size 16
     
     # Run hardware optimization only
-    python cars_training_manager.py --optimize_only --device mps
+    python cars_training_manager_fixed.py --optimize_only --device mps
     
     # Launch multiple experiments
-    python cars_training_manager.py --data_path data/processed --experiments baseline improved large
+    python cars_training_manager_fixed.py --data_path data/processed --experiments baseline improved large
 """
 
 import argparse
@@ -64,483 +64,343 @@ class HardwareOptimizer:
                 return torch.device('mps')
             else:
                 return torch.device('cpu')
+        elif device in ['cuda', 'gpu']:
+            if torch.cuda.is_available():
+                return torch.device('cuda')
+            else:
+                print("⚠️  CUDA not available, falling back to CPU")
+                return torch.device('cpu')
+        elif device == 'mps':
+            if hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
+                return torch.device('mps')
+            else:
+                print("⚠️  MPS not available, falling back to CPU")
+                return torch.device('cpu')
         else:
-            return torch.device(device)
+            return torch.device('cpu')
     
     def _get_device_info(self) -> Dict[str, Any]:
         """Get detailed device information"""
         info = {
-            'type': self.device.type,
-            'description': 'Unknown',
-            'vram_gb': 0,
-            'compute_capability': None,
+            'device': str(self.device),
             'vendor': 'Unknown',
-            'optimization_hints': []
+            'description': 'Unknown device',
+            'vram_gb': 0
         }
         
         if self.device.type == 'cuda':
-            # NVIDIA GPU info
+            info['vendor'] = 'NVIDIA'
             info['description'] = torch.cuda.get_device_name(0)
             info['vram_gb'] = torch.cuda.get_device_properties(0).total_memory / (1024**3)
-            info['compute_capability'] = torch.cuda.get_device_capability(0)
-            info['vendor'] = 'NVIDIA'
-            
-            # Optimization hints based on GPU generation
-            compute_major, compute_minor = info['compute_capability']
-            if compute_major >= 8:  # Ampere and newer (RTX 30xx, A100, etc.)
-                info['optimization_hints'] = [
-                    'Supports bfloat16 - consider using precision="bf16-mixed"',
-                    'Efficient at larger batch sizes',
-                    'TensorFloat-32 (TF32) enabled by default'
-                ]
-            elif compute_major >= 7:  # Turing/Volta (RTX 20xx, V100, etc.)
-                info['optimization_hints'] = [
-                    'Good float16 performance - use precision="16-mixed"',
-                    'Tensor Cores available for acceleration'
-                ]
-            else:
-                info['optimization_hints'] = [
-                    'Limited mixed precision support',
-                    'Consider smaller batch sizes'
-                ]
-                
         elif self.device.type == 'mps':
-            # Apple Silicon GPU
-            info['description'] = 'Apple Silicon GPU (Metal Performance Shaders)'
             info['vendor'] = 'Apple'
-            # MPS doesn't expose VRAM directly, estimate based on system
-            if self.system_memory >= 32:
-                info['vram_gb'] = self.system_memory * 0.75  # Unified memory
-            else:
-                info['vram_gb'] = self.system_memory * 0.5
-            info['optimization_hints'] = [
-                'Unified memory architecture',
-                'Good performance with batch sizes 8-32',
-                'Use precision="32-true" for stability'
-            ]
-            
-        elif self.device.type == 'cpu':
-            info['description'] = 'CPU'
+            info['description'] = 'Apple Metal Performance Shaders'
+            # MPS doesn't provide direct VRAM query
+            info['vram_gb'] = 8.0 if 'Pro' in str(self.system_memory) else 16.0  # Estimate
+        else:
             info['vendor'] = 'CPU'
-            try:
-                import cpuinfo
-                cpu_info = cpuinfo.get_cpu_info()
-                info['description'] = cpu_info.get('brand_raw', 'CPU')
-            except:
-                pass
-            info['optimization_hints'] = [
-                'Limited to smaller batch sizes',
-                'Consider using smaller models',
-                'Enable CPU optimizations (MKL, OpenMP)'
-            ]
-        
-        # Check for Intel GPU (if available in future PyTorch versions)
-        try:
-            import intel_extension_for_pytorch as ipex
-            if hasattr(torch, 'xpu') and torch.xpu.is_available():
-                info['type'] = 'xpu'
-                info['description'] = 'Intel GPU (XPU)'
-                info['vendor'] = 'Intel'
-                info['vram_gb'] = torch.xpu.get_device_properties(0).total_memory / (1024**3)
-                info['optimization_hints'] = [
-                    'Use Intel Extension for PyTorch (IPEX)',
-                    'Good performance with batch sizes 4-16',
-                    'Consider precision="16-mixed" for newer Intel GPUs'
-                ]
-        except ImportError:
-            pass
-        
-        # Check for AMD GPU (ROCm)
-        if self.device.type == 'cuda' and 'AMD' in info['description']:
-            info['vendor'] = 'AMD'
-            info['optimization_hints'] = [
-                'ROCm backend detected',
-                'Performance may vary from NVIDIA',
-                'Stick to power-of-2 batch sizes',
-                'Mixed precision support depends on GPU generation'
-            ]
+            info['description'] = 'CPU-based computation'
+            info['vram_gb'] = 0
         
         return info
     
-    def get_memory_usage(self) -> float:
-        """Get current memory usage in GB"""
-        process = psutil.Process()
-        return process.memory_info().rss / (1024**3)
-    
-    def benchmark_configurations(self, image_size: int = 512) -> Dict:
-        """Benchmark different model configurations adapted for device type"""
-        print("\n📊 Benchmarking model configurations...")
+    def benchmark_configurations(self) -> Dict[str, Any]:
+        """Benchmark different model configurations"""
+        print("\n🔬 Benchmarking configurations...")
         
-        # Import here to avoid circular dependencies
-        sys.path.append(str(Path(__file__).parent.parent))
-        from src.models.fastgan import FastGAN
+        from src.models.fastgan import FastGANGenerator, FastGANDiscriminator
         
-        # Adapt configurations based on device
-        configs = self._get_device_adapted_configs()
-        batch_sizes = self._get_device_adapted_batch_sizes()
+        configs = [
+            {'name': 'Micro', 'ngf': 32, 'ndf': 32, 'n_layers': 3},
+            {'name': 'Small', 'ngf': 48, 'ndf': 48, 'n_layers': 3},
+            {'name': 'Standard', 'ngf': 64, 'ndf': 64, 'n_layers': 4},
+            {'name': 'Large', 'ngf': 96, 'ndf': 96, 'n_layers': 4},
+        ]
         
+        batch_sizes = [1, 4, 8, 12, 16, 20, 24, 32]
         results = []
         
         for config in configs:
-            print(f"\n🔧 Testing {config['name']} configuration...")
+            print(f"\n📊 Testing {config['name']} configuration...")
             config_results = []
             
             for batch_size in batch_sizes:
                 try:
-                    # Clear cache based on device type
-                    self._clear_device_cache()
+                    # Test model
+                    result = self._benchmark_single_config(
+                        config['ngf'], config['ndf'], config['n_layers'], 
+                        batch_size, image_size=512
+                    )
                     
-                    baseline_memory = self.get_memory_usage()
-                    
-                    # Create model
-                    model = FastGAN(
-                        latent_dim=256,
-                        ngf=config['ngf'],
-                        ndf=config['ndf'],
-                        generator_layers=config['g_layers'],
-                        discriminator_layers=config['d_layers'],
-                        image_size=image_size,
-                        channels=1
-                    ).to(self.device)
-                    
-                    # Apply device-specific optimizations
-                    model = self._apply_device_optimizations(model)
-                    
-                    # Test forward and backward pass
-                    start_time = time.time()
-                    
-                    z = torch.randn(batch_size, 256, device=self.device)
-                    fake_images = model.generator(z)
-                    real_images = torch.randn(batch_size, 1, image_size, image_size, device=self.device)
-                    
-                    real_pred = model.discriminator(real_images)
-                    fake_pred = model.discriminator(fake_images)
-                    
-                    if isinstance(real_pred, tuple):
-                        real_pred = real_pred[0]
-                    if isinstance(fake_pred, tuple):
-                        fake_pred = fake_pred[0]
-                    
-                    loss = real_pred.mean() + fake_pred.mean()
-                    loss.backward()
-                    
-                    # Synchronize for accurate timing on GPU
-                    if self.device.type == 'cuda':
-                        torch.cuda.synchronize()
-                    
-                    total_time = time.time() - start_time
-                    peak_memory = self.get_memory_usage()
-                    
-                    # Get VRAM usage for GPUs
-                    vram_usage = 0
-                    if self.device.type == 'cuda':
-                        vram_usage = torch.cuda.max_memory_allocated() / (1024**3)
-                        torch.cuda.reset_peak_memory_stats()
-                    elif self.device.type == 'mps':
-                        # MPS doesn't provide direct memory stats yet
-                        vram_usage = peak_memory - baseline_memory
-                    
-                    config_results.append({
-                        'batch_size': batch_size,
-                        'time': total_time,
-                        'memory': peak_memory - baseline_memory,
-                        'vram': vram_usage,
-                        'samples_per_second': batch_size / total_time,
-                        'success': True
-                    })
-                    
-                    print(f"   Batch {batch_size:2d}: ✅ {total_time:.3f}s, "
-                          f"RAM: {peak_memory - baseline_memory:.2f}GB, "
-                          f"VRAM: {vram_usage:.2f}GB, "
-                          f"{batch_size / total_time:.1f} samples/s")
-                    
-                    del model, fake_images, real_images, z
-                    
+                    if result['success']:
+                        config_results.append(result)
+                        print(f"   ✅ Batch size {batch_size}: {result['samples_per_second']:.1f} samples/sec")
+                    else:
+                        print(f"   ❌ Batch size {batch_size}: Failed")
+                        break
+                        
                 except Exception as e:
-                    print(f"   Batch {batch_size:2d}: ❌ {str(e)[:50]}...")
-                    config_results.append({
-                        'batch_size': batch_size,
-                        'success': False,
-                        'error': str(e)
-                    })
-                    
-                    try:
-                        del model, fake_images, real_images, z
-                    except:
-                        pass
-                    
-                    self._clear_device_cache()
+                    print(f"   ❌ Batch size {batch_size}: {str(e)}")
+                    break
             
             results.append({
-                'config': config,
-                'results': config_results
+                'config_name': config['name'],
+                'ngf': config['ngf'],
+                'ndf': config['ndf'],
+                'n_layers': config['n_layers'],
+                'image_size': 512,
+                'batch_results': config_results
             })
         
-        self.optimization_results = results
-        recommendations = self._analyze_results(results)
+        self.optimization_results = {
+            'device_info': self.device_info,
+            'system_memory_gb': self.system_memory,
+            'timestamp': datetime.now().isoformat(),
+            'results': results
+        }
         
-        # Add device-specific recommendations
-        self._add_device_recommendations(recommendations)
+        return self._analyze_results()
+    
+    def _benchmark_single_config(self, ngf: int, ndf: int, n_layers: int, 
+                                batch_size: int, image_size: int) -> Dict[str, Any]:
+        """Benchmark a single configuration"""
+        import torch.nn as nn
         
-        return recommendations
-    
-    def _get_device_adapted_configs(self) -> List[Dict]:
-        """Get model configurations adapted for device type"""
-        base_configs = [
-            {"name": "Micro", "ngf": 32, "ndf": 32, "g_layers": 3, "d_layers": 2},
-            {"name": "Small", "ngf": 48, "ndf": 48, "g_layers": 3, "d_layers": 3},
-            {"name": "Standard", "ngf": 64, "ndf": 64, "g_layers": 4, "d_layers": 3},
-            {"name": "Large", "ngf": 96, "ndf": 96, "g_layers": 4, "d_layers": 4},
-            {"name": "XLarge", "ngf": 128, "ndf": 128, "g_layers": 5, "d_layers": 4}
-        ]
-        
-        # Adapt based on device capabilities
-        if self.device_info['vram_gb'] < 4:
-            # Low VRAM - limit to smaller models
-            return base_configs[:3]
-        elif self.device_info['vram_gb'] < 8:
-            # Medium VRAM
-            return base_configs[:4]
-        else:
-            # High VRAM - all configs
-            return base_configs
-    
-    def _get_device_adapted_batch_sizes(self) -> List[int]:
-        """Get batch sizes adapted for device type"""
-        if self.device.type == 'cpu':
-            return [1, 2, 4, 8]
-        elif self.device_info['vram_gb'] < 4:
-            return [1, 2, 4, 8, 16]
-        elif self.device_info['vram_gb'] < 8:
-            return [1, 2, 4, 8, 16, 24, 32]
-        elif self.device_info['vram_gb'] < 16:
-            return [1, 2, 4, 8, 16, 24, 32, 48, 64]
-        else:
-            # High VRAM GPUs
-            return [1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128]
-    
-    def _clear_device_cache(self):
-        """Clear device cache based on device type"""
-        if self.device.type == 'cuda':
-            torch.cuda.empty_cache()
-            if hasattr(torch.cuda, 'reset_peak_memory_stats'):
+        try:
+            # Create models
+            generator = FastGANGenerator(
+                latent_dim=256,
+                ngf=ngf,
+                n_layers=n_layers,
+                image_size=image_size,
+                channels=1
+            ).to(self.device)
+            
+            discriminator = FastGANDiscriminator(
+                ndf=ndf,
+                n_layers=n_layers,
+                image_size=image_size,
+                channels=1
+            ).to(self.device)
+            
+            # Test data
+            noise = torch.randn(batch_size, 256).to(self.device)
+            real_images = torch.randn(batch_size, 1, image_size, image_size).to(self.device)
+            
+            # Warmup
+            for _ in range(3):
+                _ = generator(noise)
+                _ = discriminator(real_images)
+            
+            # Measure memory before
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize()
                 torch.cuda.reset_peak_memory_stats()
-        elif self.device.type == 'mps':
-            if hasattr(torch.mps, 'empty_cache'):
-                torch.mps.empty_cache()
-        # Intel XPU
-        elif hasattr(torch, 'xpu') and self.device.type == 'xpu':
-            if hasattr(torch.xpu, 'empty_cache'):
-                torch.xpu.empty_cache()
+                baseline_memory = torch.cuda.memory_allocated() / (1024**3)
+            else:
+                baseline_memory = 0
+            
+            # Time forward pass
+            start_time = time.time()
+            
+            with torch.no_grad():
+                for _ in range(10):
+                    fake_images = generator(noise)
+                    _ = discriminator(fake_images)
+            
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize()
+            
+            forward_time = (time.time() - start_time) / 10
+            
+            # Time backward pass
+            fake_images = generator(noise)
+            d_fake = discriminator(fake_images)
+            loss = d_fake.mean()
+            
+            start_time = time.time()
+            loss.backward()
+            
+            if self.device.type == 'cuda':
+                torch.cuda.synchronize()
+            
+            backward_time = time.time() - start_time
+            
+            # Memory usage
+            if self.device.type == 'cuda':
+                peak_memory = torch.cuda.max_memory_allocated() / (1024**3)
+                current_memory = torch.cuda.memory_allocated() / (1024**3)
+            else:
+                peak_memory = current_memory = 0
+            
+            # Cleanup
+            del generator, discriminator, noise, real_images, fake_images
+            if self.device.type == 'cuda':
+                torch.cuda.empty_cache()
+            
+            return {
+                'batch_size': batch_size,
+                'forward_time': forward_time,
+                'backward_time': backward_time,
+                'total_time': forward_time + backward_time,
+                'baseline_memory': baseline_memory,
+                'model_memory': current_memory,
+                'peak_memory': peak_memory,
+                'memory_increase': peak_memory - baseline_memory,
+                'samples_per_second': batch_size / (forward_time + backward_time),
+                'success': True
+            }
+            
+        except Exception as e:
+            return {
+                'batch_size': batch_size,
+                'error': str(e),
+                'success': False
+            }
     
-    def _apply_device_optimizations(self, model):
-        """Apply device-specific optimizations to model"""
-        if self.device_info['vendor'] == 'NVIDIA':
-            # Enable TF32 for Ampere GPUs
-            if self.device_info['compute_capability'][0] >= 8:
-                torch.backends.cuda.matmul.allow_tf32 = True
-                torch.backends.cudnn.allow_tf32 = True
-            
-            # Enable cudnn benchmarking
-            torch.backends.cudnn.benchmark = True
-            
-        elif self.device_info['vendor'] == 'Intel':
-            # Apply Intel optimizations if IPEX is available
-            try:
-                import intel_extension_for_pytorch as ipex
-                model = ipex.optimize(model)
-            except ImportError:
-                pass
-                
-        elif self.device_info['vendor'] == 'AMD':
-            # ROCm specific optimizations
-            # Currently limited, but can add as PyTorch ROCm support improves
-            pass
-            
-        return model
-    
-    def _add_device_recommendations(self, recommendations: Dict):
-        """Add device-specific recommendations"""
-        if 'optimal' in recommendations:
-            optimal_config = recommendations[recommendations['optimal']]
-            
-            # Add precision recommendations
-            if self.device_info['vendor'] == 'NVIDIA':
-                compute_major = self.device_info['compute_capability'][0]
-                if compute_major >= 8:
-                    optimal_config['recommended_precision'] = 'bf16-mixed'
-                elif compute_major >= 7:
-                    optimal_config['recommended_precision'] = '16-mixed'
-                else:
-                    optimal_config['recommended_precision'] = '32-true'
-                    
-            elif self.device_info['vendor'] == 'Apple':
-                optimal_config['recommended_precision'] = '32-true'
-                
-            elif self.device_info['vendor'] == 'Intel':
-                optimal_config['recommended_precision'] = '16-mixed'
-                
-            elif self.device_info['vendor'] == 'AMD':
-                optimal_config['recommended_precision'] = '16-mixed'
-                
-            else:  # CPU
-                optimal_config['recommended_precision'] = '32-true'
-            
-            # Add other optimization flags
-            optimal_config['optimization_flags'] = self.device_info['optimization_hints']
-    
-    def _analyze_results(self, results: List[Dict]) -> Dict:
-        """Analyze optimization results and provide recommendations"""
+    def _analyze_results(self) -> Dict[str, Any]:
+        """Analyze benchmark results and provide recommendations"""
         recommendations = {}
         
-        for config_result in results:
-            config = config_result['config']
-            config_name = config['name']
+        for result in self.optimization_results['results']:
+            config_name = result['config_name']
+            batch_results = result['batch_results']
             
-            # Find optimal batch size
-            successful_results = [r for r in config_result['results'] if r.get('success', False)]
+            if not batch_results:
+                continue
             
-            if successful_results:
-                # Balance between speed and memory
-                scores = []
-                for r in successful_results:
-                    # Score based on samples/second and memory efficiency
-                    memory_score = 1.0 / (1.0 + r['memory'])  # Lower memory is better
-                    speed_score = r['samples_per_second'] / 100.0  # Normalized speed
-                    combined_score = 0.7 * speed_score + 0.3 * memory_score
-                    scores.append((r, combined_score))
-                
-                optimal = max(scores, key=lambda x: x[1])[0]
-                
-                recommendations[config_name] = {
-                    'batch_size': optimal['batch_size'],
-                    'memory_usage': optimal['memory'],
-                    'samples_per_second': optimal['samples_per_second'],
-                    'model_params': config
-                }
+            # Find optimal batch size (best samples/sec)
+            optimal_batch = max(batch_results, key=lambda x: x['samples_per_second'])
+            
+            # Find maximum stable batch size
+            max_batch = batch_results[-1]['batch_size']
+            
+            recommendations[config_name] = {
+                'optimal_batch_size': optimal_batch['batch_size'],
+                'max_batch_size': max_batch,
+                'optimal_samples_per_second': optimal_batch['samples_per_second'],
+                'memory_usage_gb': optimal_batch['peak_memory'],
+                'recommended': optimal_batch['samples_per_second'] > 5.0  # Threshold
+            }
         
-        # Find overall best configuration
-        if recommendations:
-            best_config = max(
-                recommendations.items(),
-                key=lambda x: x[1]['samples_per_second'] / (1.0 + x[1]['memory_usage'])
-            )
-            recommendations['optimal'] = best_config[0]
+        # Overall recommendation
+        if self.device.type == 'mps':
+            # M2 Mac specific
+            recommendations['optimal_config'] = 'Standard'
+            recommendations['optimal_settings'] = {
+                'batch_size': 16,
+                'num_workers': 0,  # MPS works better with 0 workers
+                'precision': '32-true',
+                'gradient_checkpointing': False,
+                'optimization_flags': [
+                    'export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.0',
+                    'export PYTORCH_MPS_LOW_WATERMARK_RATIO=0.0'
+                ]
+            }
+        elif self.device.type == 'cuda':
+            # NVIDIA GPU
+            vram = self.device_info['vram_gb']
+            if vram >= 24:
+                recommendations['optimal_config'] = 'Large'
+                recommendations['optimal_settings'] = {'batch_size': 32, 'precision': '16-mixed'}
+            elif vram >= 12:
+                recommendations['optimal_config'] = 'Standard'
+                recommendations['optimal_settings'] = {'batch_size': 16, 'precision': '16-mixed'}
+            else:
+                recommendations['optimal_config'] = 'Small'
+                recommendations['optimal_settings'] = {'batch_size': 8, 'precision': '32-true'}
+        else:
+            # CPU
+            recommendations['optimal_config'] = 'Micro'
+            recommendations['optimal_settings'] = {'batch_size': 4, 'num_workers': 4}
         
+        self.optimization_results['recommendations'] = recommendations
         return recommendations
     
     def save_optimization_results(self, output_dir: Path):
-        """Save optimization results and create visualizations"""
-        output_dir = Path(output_dir)
+        """Save optimization results"""
         output_dir.mkdir(parents=True, exist_ok=True)
         
-        # Save raw results
+        # Save JSON results
         with open(output_dir / 'optimization_results.json', 'w') as f:
             json.dump(self.optimization_results, f, indent=2)
         
+        # Save recommendations
+        with open(output_dir / 'recommendations.json', 'w') as f:
+            json.dump(self.optimization_results['recommendations'], f, indent=2)
+        
         # Create visualization
-        self._create_optimization_plots(output_dir)
+        self._create_benchmark_plots(output_dir)
         
-        print(f"\n✅ Optimization results saved to: {output_dir}")
+        print(f"\n📁 Results saved to: {output_dir}")
     
-    def _create_optimization_plots(self, output_dir: Path):
-        """Create optimization visualization plots"""
-        if not self.optimization_results:
-            return
+    def _create_benchmark_plots(self, output_dir: Path):
+        """Create benchmark visualization plots"""
+        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2, figsize=(15, 12))
+        fig.suptitle(f'CARS-FASTGAN Optimization Results - {self.device_info["description"]}', fontsize=16)
         
-        fig, axes = plt.subplots(2, 2, figsize=(15, 12))
-        fig.suptitle('Training Configuration Optimization Results', fontsize=16)
-        
-        # Plot 1: Batch size vs throughput for each config
-        ax1 = axes[0, 0]
-        for config_result in self.optimization_results:
-            config_name = config_result['config']['name']
-            successful = [r for r in config_result['results'] if r.get('success', False)]
+        # Plot 1: Throughput by configuration
+        for result in self.optimization_results['results']:
+            config_name = result['config_name']
+            batch_results = result['batch_results']
             
-            if successful:
-                batch_sizes = [r['batch_size'] for r in successful]
-                throughputs = [r['samples_per_second'] for r in successful]
+            if batch_results:
+                batch_sizes = [r['batch_size'] for r in batch_results]
+                throughputs = [r['samples_per_second'] for r in batch_results]
                 ax1.plot(batch_sizes, throughputs, marker='o', label=config_name)
         
         ax1.set_xlabel('Batch Size')
         ax1.set_ylabel('Samples/Second')
-        ax1.set_title('Throughput vs Batch Size')
+        ax1.set_title('Training Throughput by Configuration')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         
-        # Plot 2: Batch size vs memory for each config
-        ax2 = axes[0, 1]
-        for config_result in self.optimization_results:
-            config_name = config_result['config']['name']
-            successful = [r for r in config_result['results'] if r.get('success', False)]
+        # Plot 2: Memory usage
+        for result in self.optimization_results['results']:
+            config_name = result['config_name']
+            batch_results = result['batch_results']
             
-            if successful:
-                batch_sizes = [r['batch_size'] for r in successful]
-                memory_usage = [r['memory'] for r in successful]
+            if batch_results:
+                batch_sizes = [r['batch_size'] for r in batch_results]
+                memory_usage = [r['peak_memory'] for r in batch_results]
                 ax2.plot(batch_sizes, memory_usage, marker='s', label=config_name)
         
         ax2.set_xlabel('Batch Size')
         ax2.set_ylabel('Memory Usage (GB)')
-        ax2.set_title('Memory Usage vs Batch Size')
+        ax2.set_title('GPU/Memory Usage by Configuration')
         ax2.legend()
         ax2.grid(True, alpha=0.3)
         
-        # Plot 3: Model size comparison
-        ax3 = axes[1, 0]
-        model_names = []
-        model_params = []
-        max_throughput = []
+        # Plot 3: Optimal batch sizes
+        configs = []
+        optimal_batches = []
+        for config, rec in self.optimization_results['recommendations'].items():
+            if isinstance(rec, dict) and 'optimal_batch_size' in rec:
+                configs.append(config)
+                optimal_batches.append(rec['optimal_batch_size'])
         
-        for config_result in self.optimization_results:
-            config = config_result['config']
-            config_name = config['name']
-            successful = [r for r in config_result['results'] if r.get('success', False)]
-            
-            if successful:
-                model_names.append(config_name)
-                # Estimate parameters
-                params = (config['ngf']**2 + config['ndf']**2) * (config['g_layers'] + config['d_layers'])
-                model_params.append(params / 1000)  # In thousands
-                max_throughput.append(max(r['samples_per_second'] for r in successful))
+        ax3.bar(configs, optimal_batches, alpha=0.7)
+        ax3.set_xlabel('Configuration')
+        ax3.set_ylabel('Optimal Batch Size')
+        ax3.set_title('Recommended Batch Sizes')
         
-        bars = ax3.bar(model_names, max_throughput, alpha=0.7)
-        ax3.set_ylabel('Max Samples/Second')
-        ax3.set_title('Maximum Throughput by Model Size')
-        ax3.tick_params(axis='x', rotation=45)
+        # Plot 4: Summary text
+        ax4.axis('off')
+        summary_text = f"Device: {self.device_info['description']}\n"
+        summary_text += f"Type: {self.device_info['vendor']}\n"
+        if self.device_info['vram_gb'] > 0:
+            summary_text += f"VRAM: {self.device_info['vram_gb']:.1f} GB\n"
+        summary_text += f"System RAM: {self.system_memory:.1f} GB\n\n"
         
-        # Add parameter count on bars
-        for bar, params in zip(bars, model_params):
-            height = bar.get_height()
-            ax3.text(bar.get_x() + bar.get_width()/2., height + 0.5,
-                    f'{params:.0f}K', ha='center', va='bottom', fontsize=8)
+        if 'optimal_config' in self.optimization_results['recommendations']:
+            summary_text += f"Recommended Config: {self.optimization_results['recommendations']['optimal_config']}\n"
+            settings = self.optimization_results['recommendations']['optimal_settings']
+            summary_text += f"Batch Size: {settings.get('batch_size', 'N/A')}\n"
+            summary_text += f"Precision: {settings.get('precision', '32-true')}\n"
         
-        # Plot 4: Efficiency heatmap
-        ax4 = axes[1, 1]
-        configs = [r['config']['name'] for r in self.optimization_results]
-        batch_sizes = sorted(set(bs for r in self.optimization_results 
-                               for res in r['results'] 
-                               if res.get('success', False) 
-                               for bs in [res['batch_size']]))
-        
-        efficiency_matrix = np.zeros((len(configs), len(batch_sizes)))
-        
-        for i, config_result in enumerate(self.optimization_results):
-            for result in config_result['results']:
-                if result.get('success', False) and result['batch_size'] in batch_sizes:
-                    j = batch_sizes.index(result['batch_size'])
-                    # Efficiency score
-                    efficiency = result['samples_per_second'] / (1.0 + result['memory'])
-                    efficiency_matrix[i, j] = efficiency
-        
-        im = ax4.imshow(efficiency_matrix, cmap='YlOrRd', aspect='auto')
-        ax4.set_xticks(range(len(batch_sizes)))
-        ax4.set_xticklabels(batch_sizes)
-        ax4.set_yticks(range(len(configs)))
-        ax4.set_yticklabels(configs)
-        ax4.set_xlabel('Batch Size')
-        ax4.set_ylabel('Model Configuration')
-        ax4.set_title('Training Efficiency Heatmap')
-        plt.colorbar(im, ax=ax4, label='Efficiency Score')
+        ax4.text(0.1, 0.9, summary_text, transform=ax4.transAxes, 
+                fontsize=12, verticalalignment='top', fontfamily='monospace')
+        ax4.set_title('Optimization Summary')
         
         plt.tight_layout()
         plt.savefig(output_dir / 'optimization_analysis.png', dpi=300, bbox_inches='tight')
@@ -584,60 +444,6 @@ class TrainingManager:
         if base_name:
             return f"{base_name}_{timestamp}"
         return f"cars_fastgan_{timestamp}"
-    
-    def build_training_command(self, config: Dict[str, Any]) -> List[str]:
-        """Build training command with proper Hydra overrides"""
-        cmd = ["python", "main.py"]
-        
-        # Add configuration overrides
-        for key, value in config.items():
-            if key == 'experiment_name':
-                cmd.append(f"experiment_name={value}")
-            elif key == 'data_path':
-                cmd.append(f"data_path={value}")
-            elif key == 'model':
-                self._add_model_overrides(cmd, value)
-            elif key == 'data':
-                for sub_key, sub_value in value.items():
-                    cmd.append(f"data.{sub_key}={sub_value}")
-            elif key == 'training':
-                for sub_key, sub_value in value.items():
-                    if sub_key == 'max_epochs':
-                        cmd.append(f"max_epochs={sub_value}")
-                    else:
-                        cmd.append(f"training.{sub_key}={sub_value}")
-            elif key in ['max_epochs', 'use_wandb', 'accelerator', 'devices', 'precision']:
-                cmd.append(f"{key}={value}")
-            elif key == 'callbacks':
-                for cb_key, cb_value in value.items():
-                    for param_key, param_value in cb_value.items():
-                        cmd.append(f"callbacks.{cb_key}.{param_key}={param_value}")
-        
-        return cmd
-    
-    def _add_model_overrides(self, cmd: List[str], model_config: Dict[str, Any]):
-        """Add model configuration overrides handling special cases"""
-        for sub_key, sub_value in model_config.items():
-            if isinstance(sub_value, dict):
-                for sub_sub_key, sub_sub_value in sub_value.items():
-                    # Handle special cases like lists and complex values
-                    if isinstance(sub_sub_value, list):
-                        # Skip lists like betas - they should be in config files
-                        # or convert to string format Hydra can understand
-                        if sub_sub_key == 'betas':
-                            # Skip betas as they're already in the config file
-                            continue
-                        elif sub_sub_key == 'feature_layers':
-                            # Feature layers can be passed as a string
-                            layers_str = ','.join(map(str, sub_sub_value))
-                            cmd.append(f"model.{sub_key}.{sub_sub_key}=[{layers_str}]")
-                    elif isinstance(sub_sub_value, bool):
-                        # Convert boolean to lowercase string
-                        cmd.append(f"model.{sub_key}.{sub_sub_key}={str(sub_sub_value).lower()}")
-                    else:
-                        cmd.append(f"model.{sub_key}.{sub_sub_key}={sub_sub_value}")
-            else:
-                cmd.append(f"model.{sub_key}={sub_value}")
     
     def get_model_config(self, model_size: str) -> Dict[str, Any]:
         """Get model configuration by size"""
@@ -695,6 +501,7 @@ class TrainingManager:
                 'optimizer': {
                     'generator': {'lr': 0.0001},
                     'discriminator': {'lr': 0.0004}
+                    # Note: betas are already defined in config files
                 },
                 'training': {
                     'use_gradient_penalty': True,
@@ -764,6 +571,83 @@ class TrainingManager:
             print(f"❌ Data path not found: {data_path}")
             return False
         
+        # Handle improved preset specially - use the config file directly
+        if preset == 'improved':
+            # Get preset config for default values
+            preset_config = self.get_experiment_presets()['improved']
+            batch_size = batch_size or preset_config.get('batch_size', 16)
+            max_epochs = preset_config.get('max_epochs', 1500)
+            
+            # Create experiment name
+            if experiment_name is None:
+                experiment_name = self.create_experiment_name('improved')
+            
+            # Build command using the improved config file
+            cmd = ["python", "main.py"]
+            cmd.extend([
+                f"experiment_name={experiment_name}",
+                f"data_path={str(data_path.resolve())}",
+                "model=fastgan_improved",  # Override the model config (not +model)
+                f"data.batch_size={batch_size}",
+                f"data.num_workers={num_workers}",
+                f"max_epochs={max_epochs}",
+                "gradient_clip_val=0",  # Disable gradient clipping for manual optimization
+                "enable_progress_bar=false"  # Disable progress bar to avoid bugs
+            ])
+            
+            if use_wandb:
+                cmd.append(f"use_wandb={use_wandb}")
+                if wandb_project:
+                    cmd.append(f"wandb.project={wandb_project}")
+            
+            if device != 'auto':
+                if device == 'gpu' or device == 'cuda':
+                    cmd.extend(['accelerator=gpu', 'devices=1'])
+                elif device == 'mps':
+                    cmd.extend(['accelerator=mps', 'devices=1'])
+                elif device == 'cpu':
+                    cmd.extend(['accelerator=cpu', 'devices=1'])
+            
+            if resume_checkpoint:
+                cmd.append(f"resume_from_checkpoint={resume_checkpoint}")
+            
+            # Print configuration summary
+            print(f"📋 Using preset: improved - {preset_config['description']}")
+            print(f"\n📋 Training Configuration:")
+            print(f"   Experiment: {experiment_name}")
+            print(f"   Data: {data_path}")
+            print(f"   Preset: improved (using fastgan_improved.yaml)")
+            print(f"   Batch size: {batch_size}")
+            print(f"   Epochs: {max_epochs}")
+            print(f"   Device: {device}")
+            
+            if dry_run:
+                print(f"\n🔍 Dry run - Command:")
+                print(" ".join(cmd[:3]))
+                for c in cmd[3:]:
+                    print(f"    {c} \\")
+                return True
+            
+            # Launch training
+            print(f"\n🚀 Launching training...")
+            print("=" * 60)
+            
+            try:
+                result = subprocess.run(cmd, cwd=self.project_root, check=True)
+                print("\n✅ Training completed successfully!")
+                return True
+            except subprocess.CalledProcessError as e:
+                print(f"\n❌ Training failed with exit code {e.returncode}")
+                if e.returncode == 1:
+                    print("\n💡 If you see Hydra override errors, try:")
+                    print("   export HYDRA_FULL_ERROR=1")
+                    print("   Then run the command again for detailed error messages")
+                return False
+            except KeyboardInterrupt:
+                print("\n⏸️  Training interrupted by user")
+                return False
+        
+        # For all other presets and configurations, use the regular flow
         # Create experiment name
         if experiment_name is None:
             experiment_name = self.create_experiment_name(preset or model_size)
@@ -772,16 +656,21 @@ class TrainingManager:
         config = {
             'experiment_name': experiment_name,
             'data_path': str(data_path.resolve()),
-            'max_epochs': max_epochs,
-            'use_wandb': use_wandb
+            'max_epochs': max_epochs
         }
         
-        # Apply preset if specified
+        if use_wandb:
+            config['use_wandb'] = use_wandb
+            if wandb_project:
+                config['wandb'] = {'project': wandb_project}
+        
+        # Apply preset if specified (but not improved, which was handled above)
         if preset and preset in self.get_experiment_presets():
             preset_config = self.get_experiment_presets()[preset]
             model_size = preset_config.get('model_size', model_size)
             batch_size = batch_size or preset_config.get('batch_size', 8)
             max_epochs = preset_config.get('max_epochs', max_epochs)
+            config['max_epochs'] = max_epochs
             
             # Apply preset configurations
             if 'loss' in preset_config:
@@ -814,7 +703,7 @@ class TrainingManager:
         
         # Device configuration
         if device != 'auto':
-            if device == 'gpu':
+            if device == 'gpu' or device == 'cuda':
                 config['accelerator'] = 'gpu'
                 config['devices'] = 1
             elif device == 'mps':
@@ -823,10 +712,6 @@ class TrainingManager:
             elif device == 'cpu':
                 config['accelerator'] = 'cpu'
                 config['devices'] = 1
-        
-        # W&B configuration
-        if use_wandb and wandb_project:
-            config['wandb'] = {'project': wandb_project}
         
         # Resume from checkpoint
         if resume_checkpoint:
@@ -870,56 +755,99 @@ class TrainingManager:
             print("\n⏸️  Training interrupted by user")
             return False
     
+    def build_training_command(self, config: Dict[str, Any]) -> List[str]:
+        """Build training command with proper Hydra overrides"""
+        cmd = ["python", "main.py"]
+        
+        # Add configuration overrides
+        for key, value in config.items():
+            if key == 'experiment_name':
+                cmd.append(f"experiment_name={value}")
+            elif key == 'data_path':
+                cmd.append(f"data_path={value}")
+            elif key == 'model':
+                self._add_model_overrides(cmd, value)
+            elif key == 'data':
+                for sub_key, sub_value in value.items():
+                    cmd.append(f"data.{sub_key}={sub_value}")
+            elif key == 'training':
+                for sub_key, sub_value in value.items():
+                    if sub_key == 'max_epochs':
+                        cmd.append(f"max_epochs={sub_value}")
+                    else:
+                        cmd.append(f"training.{sub_key}={sub_value}")
+            elif key in ['max_epochs', 'use_wandb', 'accelerator', 'devices', 'precision']:
+                cmd.append(f"{key}={value}")
+            elif key == 'callbacks':
+                for cb_key, cb_value in value.items():
+                    for param_key, param_value in cb_value.items():
+                        cmd.append(f"callbacks.{cb_key}.{param_key}={param_value}")
+        
+        return cmd
+    
+    def _add_model_overrides(self, cmd: List[str], model_config: Dict[str, Any]):
+        """Add model configuration overrides handling special cases"""
+        for sub_key, sub_value in model_config.items():
+            if isinstance(sub_value, dict):
+                for sub_sub_key, sub_sub_value in sub_value.items():
+                    # Handle special cases like lists and complex values
+                    if isinstance(sub_sub_value, list):
+                        # Skip lists like betas - they should be in config files
+                        # or convert to string format Hydra can understand
+                        if sub_sub_key == 'betas':
+                            # Skip betas as they're already in the config file
+                            continue
+                        elif sub_sub_key == 'feature_layers':
+                            # Feature layers can be passed as a string
+                            layers_str = ','.join(map(str, sub_sub_value))
+                            cmd.append(f"model.{sub_key}.{sub_sub_key}=[{layers_str}]")
+                    elif isinstance(sub_sub_value, bool):
+                        # Convert boolean to lowercase string
+                        cmd.append(f"model.{sub_key}.{sub_sub_key}={str(sub_sub_value).lower()}")
+                    else:
+                        cmd.append(f"model.{sub_key}.{sub_sub_key}={sub_sub_value}")
+            else:
+                cmd.append(f"model.{sub_key}={sub_value}")
+    
     def launch_multiple_experiments(
         self,
         data_path: str,
         experiments: List[str],
-        base_config: Optional[Dict] = None,
-        sequential: bool = True
+        base_config: Optional[Dict] = None
     ) -> Dict[str, bool]:
-        """Launch multiple experiments"""
+        """Launch multiple experiments sequentially"""
         results = {}
         
-        print(f"\n🔬 Launching {len(experiments)} experiments...")
+        print(f"\n🚀 Launching {len(experiments)} experiments...")
         
-        for exp_name in experiments:
+        for i, experiment in enumerate(experiments, 1):
             print(f"\n{'='*60}")
-            print(f"Experiment: {exp_name}")
+            print(f"📊 Experiment {i}/{len(experiments)}: {experiment}")
             print(f"{'='*60}")
             
-            # Get preset or use as model size
+            # Determine if it's a preset or model size
             presets = self.get_experiment_presets()
-            if exp_name in presets:
+            
+            if experiment in presets:
                 success = self.launch_training(
                     data_path=data_path,
-                    preset=exp_name,
-                    additional_config=base_config
+                    preset=experiment,
+                    **(base_config or {})
                 )
             else:
-                # Assume it's a model size
                 success = self.launch_training(
                     data_path=data_path,
-                    model_size=exp_name,
-                    experiment_name=f"{exp_name}_experiment",
-                    additional_config=base_config
+                    model_size=experiment,
+                    **(base_config or {})
                 )
             
-            results[exp_name] = success
+            results[experiment] = success
             
-            if not sequential:
-                print("⚠️  Non-sequential mode not implemented yet")
-                break
-            
-            if not success and sequential:
-                print(f"\n❌ Experiment {exp_name} failed, stopping sequence")
-                break
-        
-        # Summary
-        print(f"\n{'='*60}")
-        print("📊 Experiment Summary:")
-        for exp, success in results.items():
-            status = "✅ Success" if success else "❌ Failed"
-            print(f"   {exp}: {status}")
+            if not success:
+                print(f"\n⚠️  Experiment {experiment} failed!")
+                continue_prompt = input("Continue with remaining experiments? (y/n): ")
+                if continue_prompt.lower() != 'y':
+                    break
         
         return results
     
@@ -927,56 +855,48 @@ class TrainingManager:
         self,
         data_path: str,
         device: str = 'auto',
-        target_metric: str = 'efficiency'
+        auto_launch: bool = True
     ) -> bool:
         """Run optimization and launch with optimal settings"""
-        print("\n🔧 Running optimization before training...")
+        print("\n🔬 Running hardware optimization...")
         
-        # Run optimization
         optimizer = HardwareOptimizer(device)
         recommendations = optimizer.benchmark_configurations()
         
-        # Save optimization results
+        # Save results
         opt_dir = self.project_root / "scripts/optimization_results"
         optimizer.save_optimization_results(opt_dir)
         
+        if not auto_launch:
+            print("\n✅ Optimization complete! Check results in:")
+            print(f"   {opt_dir}")
+            return True
+        
         # Get optimal configuration
-        if 'optimal' in recommendations:
-            optimal_config = recommendations['optimal']
-            optimal_settings = recommendations[optimal_config]
-            
-            print(f"\n✅ Optimal configuration: {optimal_config}")
-            print(f"   Batch size: {optimal_settings['batch_size']}")
-            print(f"   Memory usage: {optimal_settings['memory_usage']:.2f} GB")
-            if 'vram' in optimal_settings:
-                print(f"   VRAM usage: {optimal_settings.get('vram', 0):.2f} GB")
-            print(f"   Throughput: {optimal_settings['samples_per_second']:.1f} samples/s")
-            
-            # Print device-specific recommendations
-            if 'recommended_precision' in optimal_settings:
-                print(f"   Recommended precision: {optimal_settings['recommended_precision']}")
-            if 'optimization_flags' in optimal_settings:
-                print(f"\n   Device-specific optimizations:")
-                for flag in optimal_settings['optimization_flags']:
-                    print(f"   - {flag}")
-            
-            # Build additional config with device optimizations
-            additional_config = {}
-            if 'recommended_precision' in optimal_settings:
-                additional_config['precision'] = optimal_settings['recommended_precision']
-            
-            # Launch training with optimal settings
-            return self.launch_training(
-                data_path=data_path,
-                model_size=optimal_config.lower(),
-                batch_size=optimal_settings['batch_size'],
-                experiment_name=f"optimized_{optimal_config.lower()}_{optimizer.device_info['vendor'].lower()}",
-                device=device,
-                additional_config=additional_config
-            )
-        else:
-            print("❌ No optimal configuration found")
-            return False
+        optimal_config = recommendations.get('optimal_config', 'standard')
+        optimal_settings = recommendations.get('optimal_settings', {})
+        
+        print(f"\n📋 Optimal configuration: {optimal_config}")
+        print(f"   Batch size: {optimal_settings.get('batch_size', 8)}")
+        print(f"   Precision: {optimal_settings.get('precision', '32-true')}")
+        
+        if 'optimization_flags' in optimal_settings:
+            print("\n🚩 Setting optimization flags:")
+            for flag in optimal_settings['optimization_flags']:
+                print(f"   - {flag}")
+                # Set environment variables
+                parts = flag.replace('export ', '').split('=')
+                if len(parts) == 2:
+                    os.environ[parts[0]] = parts[1]
+        
+        # Launch training with optimal settings
+        return self.launch_training(
+            data_path=data_path,
+            model_size=optimal_config.lower(),
+            batch_size=optimal_settings.get('batch_size', 8),
+            device=device,
+            experiment_name=f"optimized_{optimal_config.lower()}_{optimizer.device_info['vendor'].lower()}"
+        )
     
     def _merge_configs(self, base: Dict, update: Dict):
         """Recursively merge configuration dictionaries"""
@@ -988,7 +908,7 @@ class TrainingManager:
     
     def show_available_checkpoints(self) -> List[Path]:
         """Show available checkpoints"""
-        checkpoints = list(self.checkpoints_dir.glob("*.ckpt"))
+        checkpoints = list(self.checkpoints_dir.glob("**/*.ckpt"))
         
         if checkpoints:
             print("\n📁 Available checkpoints:")
@@ -1000,27 +920,6 @@ class TrainingManager:
             print("\n📁 No checkpoints found")
         
         return checkpoints
-    
-    def create_config_report(self, config: Dict) -> str:
-        """Create a formatted configuration report"""
-        report = []
-        report.append("# Training Configuration Report")
-        report.append(f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        
-        def format_dict(d: Dict, indent: int = 0) -> List[str]:
-            lines = []
-            for key, value in d.items():
-                prefix = "  " * indent + "- "
-                if isinstance(value, dict):
-                    lines.append(f"{prefix}**{key}**:")
-                    lines.extend(format_dict(value, indent + 1))
-                else:
-                    lines.append(f"{prefix}{key}: {value}")
-            return lines
-        
-        report.extend(format_dict(config))
-        
-        return "\n".join(report)
 
 
 def main():
@@ -1143,8 +1042,9 @@ def main():
     
     if success and not args.dry_run:
         print("\n✨ Training completed successfully!")
-        print("📊 Check logs: experiments/logs/")
-        print("💾 Check checkpoints: experiments/checkpoints/")
+    elif not success and not args.dry_run:
+        print("\n❌ Training failed!")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
