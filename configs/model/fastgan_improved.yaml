@@ -1,0 +1,77 @@
+discriminator:
+  activation: leaky_relu
+  attention_layers:
+  - 2
+  channels: 1
+  image_size: 512
+  init_gain: 0.02
+  init_type: normal
+  leaky_relu_slope: 0.2
+  n_layers: 4
+  ndf: 64
+  norm_type: batch
+  num_scales: 3
+  use_multiscale: true
+  use_patch_gan: false
+  use_self_attention: true
+  use_spectral_norm: true
+generator:
+  activation: relu
+  attention_layers:
+  - 2
+  - 3
+  channels: 1
+  image_size: 512
+  init_gain: 0.02
+  init_type: normal
+  latent_dim: 256
+  n_layers: 4
+  ngf: 64
+  norm_type: batch
+  output_activation: tanh
+  skip_connection_scale: 0.1
+  use_self_attention: true
+  use_skip_connections: true
+loss:
+  adversarial_weight: 1.0
+  feature_layers:
+  - 1
+  - 2
+  - 3
+  - 4
+  feature_matching_weight: 20.0
+  gan_loss: hinge
+  perceptual_layers:
+  - conv_3_3
+  - conv_4_3
+  perceptual_weight: 5.0
+  use_feature_matching: true
+  use_perceptual_loss: true
+model_name: fastgan_improved
+optimizer:
+  discriminator:
+    betas:
+    - 0.0
+    - 0.999
+    lr: 0.0004
+    type: adam
+    weight_decay: 0.0
+  generator:
+    betas:
+    - 0.0
+    - 0.999
+    lr: 0.0001
+    type: adam
+    weight_decay: 0.0
+scheduler:
+  end_epoch: 1000
+  start_epoch: 500
+  type: linear
+  use_scheduler: true
+training:
+  ema_decay: 0.999
+  gradient_penalty_weight: 10.0
+  n_critic: 1
+  progressive_growing: false
+  use_ema: true
+  use_gradient_penalty: true

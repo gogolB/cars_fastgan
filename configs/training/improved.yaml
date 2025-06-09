@@ -1,0 +1,50 @@
+accelerator: auto
+accumulate_grad_batches: 1
+callbacks:
+  early_stopping:
+    min_delta: 0.01
+    mode: min
+    monitor: val/fid_score
+    patience: 300
+  image_generation:
+    enabled: true
+    log_interval: 10
+    num_samples: 16
+  lr_monitor:
+    log_momentum: false
+    logging_interval: epoch
+  model_checkpoint:
+    auto_insert_metric_name: false
+    filename: fastgan-improved-{epoch:02d}-{val_fid_score:.2f}
+    mode: min
+    monitor: val/fid_score
+    save_top_k: 5
+check_val_every_n_epoch: 10
+detect_anomaly: false
+devices: 1
+early_stopping_patience: 300
+enable_checkpointing: true
+enable_model_summary: true
+enable_progress_bar: true
+gan_training:
+  adaptive_lr: true
+  discriminator_warmup: 10
+  fixed_noise_size: 64
+  generator_skip_threshold: 0.8
+  loss_balance_threshold: 0.1
+  loss_smoothing_window: 100
+  lr_adaptation_factor: 0.5
+  lr_adaptation_window: 50
+  warmup_epochs: 20
+  warmup_lr_factor: 0.1
+gradient_clip_algorithm: norm
+gradient_clip_val: 1.0
+log_every_n_steps: 10
+log_images_every_n_epochs: 10
+max_epochs: 1500
+min_epochs: 500
+num_sample_images: 16
+precision: 32-true
+save_last: true
+save_top_k: 5
+val_check_interval: 1.0
