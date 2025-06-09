@@ -1,7 +1,5 @@
 discriminator:
   activation: leaky_relu
-  attention_layers:
-  - 2
   channels: 1
   image_size: 512
   init_gain: 0.02
@@ -13,13 +11,9 @@ discriminator:
   num_scales: 3
   use_multiscale: true
   use_patch_gan: false
-  use_self_attention: true
   use_spectral_norm: true
 generator:
   activation: relu
-  attention_layers:
-  - 2
-  - 3
   channels: 1
   image_size: 512
   init_gain: 0.02
@@ -30,7 +24,6 @@ generator:
   norm_type: batch
   output_activation: tanh
   skip_connection_scale: 0.1
-  use_self_attention: true
   use_skip_connections: true
 loss:
   adversarial_weight: 1.0
@@ -41,12 +34,7 @@ loss:
   - 4
   feature_matching_weight: 20.0
   gan_loss: hinge
-  perceptual_layers:
-  - conv_3_3
-  - conv_4_3
-  perceptual_weight: 5.0
   use_feature_matching: true
-  use_perceptual_loss: true
 model_name: fastgan_improved
 optimizer:
   discriminator:

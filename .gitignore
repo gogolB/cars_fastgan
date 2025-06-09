@@ -79,7 +79,7 @@ Thumbs.db
 
 # Project specific
 data/raw/
-data/processed/
+data/processed*/
 experiments/
 outputs/
 *.pt
@@ -93,6 +93,13 @@ wandb/
 *.tiff
 *.h5
 *.hdf5
+*.png 
+
+# Logs
+logs/
+# Temporary files
+*.tmp
+
 
 # Model checkpoints and outputs
 checkpoints/

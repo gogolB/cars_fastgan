@@ -19,7 +19,7 @@ cp -r /workspace/data_fixed/* data/
 
 # Launch training with large model
 python main.py \
-    experiment_name=cars_fastgan_large_20250609_085902 \
+    experiment_name=cars_fastgan_large_20250609_094346 \
     data_path=data/processed_fixed \
     model.generator.ngf=128 \
     model.generator.n_layers=5 \
@@ -31,10 +31,11 @@ python main.py \
     model.optimizer.discriminator.lr=0.0004 \
     model.training.use_gradient_penalty=true \
     model.training.use_ema=true \
-    training.max_epochs=2000 \
+    max_epochs=2000 \
     data.batch_size=32 \
     accelerator=gpu \
     devices=1 \
     precision=16-mixed \
+    data.num_workers=4 \
     use_wandb=true \
     wandb.project=cars-fastgan-large

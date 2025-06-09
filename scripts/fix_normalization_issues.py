@@ -57,9 +57,13 @@ class NormalizationFixer:
             # Convert to 8-bit if needed
             if img.dtype == np.uint16:
                 # Use percentile-based conversion for better dynamic range
-                p2, p98 = np.percentile(img, (2, 98))
-                img = np.clip((img - p2) / (p98 - p2), 0, 1)
+                # For CARS microscopy, use 0.1 and 99.9 percentiles to capture full range
+                p_low, p_high = np.percentile(img, (0.1, 99.9))
+                img = np.clip((img - p_low) / (p_high - p_low), 0, 1)
                 img = (img * 255).astype(np.uint8)
+                # Debug print for first image
+                if len(all_means) == 0:
+                    print(f"  Sample conversion: 16-bit [{p_low:.0f}, {p_high:.0f}] → 8-bit mean={img.mean():.1f}")
             
             all_means.append(img.mean())
             all_stds.append(img.std())
