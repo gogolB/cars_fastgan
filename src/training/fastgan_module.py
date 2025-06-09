@@ -1,6 +1,13 @@
 """
 PyTorch Lightning Module for FASTGAN Training
-Handles training loop, loss computation, and logging
+Fixed version with proper TensorBoard logging and metric tracking
+
+Key improvements:
+- Proper step-based logging with global_step
+- Consistent metric naming
+- Better loss tracking
+- Gradient norm monitoring
+- Proper image logging
 """
 
 import torch
@@ -8,19 +15,22 @@ import torch.nn as nn
 import torch.nn.functional as F
 import pytorch_lightning as pl
 from torch.optim import Adam, AdamW
-from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, StepLR
 import torchvision
 from typing import Dict, Any, Optional, Tuple, List
 import numpy as np
 from pathlib import Path
 import copy
+import logging
 
 from ..models.fastgan import FastGAN, FastGANGenerator
 from ..evaluation.metrics import FIDScore, LPIPSScore
 
+logger = logging.getLogger(__name__)
+
 
 class FastGANModule(pl.LightningModule):
-    """PyTorch Lightning module for FASTGAN training"""
+    """PyTorch Lightning module for FASTGAN training with fixed logging"""
     
     def __init__(
         self,
@@ -63,6 +73,7 @@ class FastGANModule(pl.LightningModule):
         log_images_every_n_epochs: int = 25,
         num_sample_images: int = 16,
         fixed_noise_size: int = 64,
+        log_every_n_steps: int = 50,
         
         # Evaluation parameters
         compute_fid: bool = True,
@@ -123,79 +134,63 @@ class FastGANModule(pl.LightningModule):
             try:
                 self.fid_metric = FIDScore()
             except ImportError:
-                print("Warning: FID computation requested but pytorch-fid not available")
+                logger.warning("FID computation requested but pytorch-fid not available")
                 self.compute_fid = False
                 
         if compute_lpips:
             try:
                 self.lpips_metric = LPIPSScore()
             except ImportError:
-                print("Warning: LPIPS computation requested but lpips not available")
+                logger.warning("LPIPS computation requested but lpips not available")
                 self.compute_lpips = False
         
         # Training tracking
         self.automatic_optimization = False  # Manual optimization for GANs
         
+        # Track training progress
+        self.global_train_step = 0
+        
     def _create_ema_model(self) -> FastGANGenerator:
-        """Create EMA version of generator with proper initialization"""
-        # Get the generator's initialization parameters
-        generator = self.model.generator
-        
-        # Create a new generator with the same parameters
+        """Create EMA version of generator"""
         ema_generator = FastGANGenerator(
-            latent_dim=generator.latent_dim,
-            ngf=generator.ngf,
-            n_layers=generator.n_layers,
-            image_size=generator.image_size,
-            channels=generator.channels,
-            use_skip_connections=generator.use_skip_connections,
-            norm_type=getattr(generator, 'norm_type', 'batch')  # Default to batch if not found
+            latent_dim=self.hparams.latent_dim,
+            ngf=self.hparams.ngf,
+            n_layers=self.hparams.generator_layers,
+            image_size=self.hparams.image_size,
+            channels=self.hparams.channels,
+            use_skip_connections=self.hparams.use_skip_connections,
+            norm_type=self.hparams.norm_type
         )
-        
-        # Copy the state dict
-        ema_generator.load_state_dict(generator.state_dict())
+        ema_generator.load_state_dict(self.model.generator.state_dict())
         ema_generator.eval()
         
-        # Ensure it's on the same device
-        if next(generator.parameters()).is_cuda:
-            ema_generator = ema_generator.cuda()
-        
+        for param in ema_generator.parameters():
+            param.requires_grad = False
+            
         return ema_generator
     
     def _update_ema(self):
         """Update EMA generator"""
-        if self.ema_generator is None or not self.use_ema:
+        if self.ema_generator is None:
             return
             
         with torch.no_grad():
-            for ema_param, param in zip(
-                self.ema_generator.parameters(), 
-                self.model.generator.parameters()
-            ):
-                ema_param.data.mul_(self.ema_decay).add_(
-                    param.data, alpha=1 - self.ema_decay
-                )
+            for ema_param, param in zip(self.ema_generator.parameters(), 
+                                       self.model.generator.parameters()):
+                ema_param.data.mul_(self.ema_decay).add_(param.data, alpha=1 - self.ema_decay)
     
-    def adversarial_loss(self, y_hat: torch.Tensor, y: bool) -> torch.Tensor:
-        """Compute adversarial loss
-        
-        Args:
-            y_hat: Discriminator predictions
-            y: True for real, False for fake
-        """
+    def adversarial_loss(self, pred: torch.Tensor, target_is_real: bool) -> torch.Tensor:
+        """Compute adversarial loss based on loss type"""
         if self.gan_loss == "hinge":
-            if y:  # Real
-                return F.relu(1.0 - y_hat).mean()
-            else:  # Fake
-                return F.relu(1.0 + y_hat).mean()
-        elif self.gan_loss == "lsgan":
-            target = torch.ones_like(y_hat) if y else torch.zeros_like(y_hat)
-            return F.mse_loss(y_hat, target)
-        elif self.gan_loss == "vanilla":
-            target = torch.ones_like(y_hat) if y else torch.zeros_like(y_hat)
-            return F.binary_cross_entropy_with_logits(y_hat, target)
+            if target_is_real:
+                return F.relu(1.0 - pred).mean()
+            else:
+                return F.relu(1.0 + pred).mean()
+        elif self.gan_loss == "bce":
+            target = torch.ones_like(pred) if target_is_real else torch.zeros_like(pred)
+            return F.binary_cross_entropy_with_logits(pred, target)
         elif self.gan_loss == "wgan":
-            return -y_hat.mean() if y else y_hat.mean()
+            return -pred.mean() if target_is_real else pred.mean()
         else:
             raise ValueError(f"Unknown GAN loss: {self.gan_loss}")
     
@@ -242,12 +237,15 @@ class FastGANModule(pl.LightningModule):
         return penalty
     
     def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
-        """Training step"""
+        """Training step with proper logging"""
         real_images = batch['image']
         batch_size = real_images.size(0)
         
         # Get optimizers
         opt_g, opt_d = self.optimizers()
+        
+        # Update global step counter
+        self.global_train_step += 1
         
         # Sample noise
         noise = torch.randn(batch_size, self.hparams.latent_dim, device=self.device)
@@ -255,7 +253,9 @@ class FastGANModule(pl.LightningModule):
         # Generate fake images
         fake_images = self.model.generator(noise)
         
-        # Train discriminator
+        # ============================================
+        # Train Discriminator
+        # ============================================
         opt_d.zero_grad()
         
         # Real images
@@ -302,12 +302,30 @@ class FastGANModule(pl.LightningModule):
         if self.use_gradient_penalty:
             gp = self.gradient_penalty(real_images, fake_images)
             d_loss += self.gradient_penalty_weight * gp
-            self.log("train/gradient_penalty", gp, prog_bar=False)
+            self.log("train/gradient_penalty", gp, 
+                    on_step=True, on_epoch=False, prog_bar=False, 
+                    logger=True, sync_dist=True)
         
         self.manual_backward(d_loss)
+        
+        # Gradient clipping for discriminator
+        if self.trainer.gradient_clip_val > 0:
+            torch.nn.utils.clip_grad_norm_(
+                self.model.discriminator.parameters(), 
+                self.trainer.gradient_clip_val
+            )
+        
+        # Log discriminator gradient norm
+        d_grad_norm = self._get_gradient_norm(self.model.discriminator)
+        self.log("train/d_grad_norm", d_grad_norm,
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        
         opt_d.step()
         
-        # Train generator every n_critic steps
+        # ============================================
+        # Train Generator
+        # ============================================
         if batch_idx % self.n_critic == 0:
             opt_g.zero_grad()
             
@@ -345,8 +363,10 @@ class FastGANModule(pl.LightningModule):
             if self.use_feature_matching and real_features and fake_features_g:
                 # Select only the specified layers for feature matching
                 if self.feature_layers:
-                    real_features_selected = [real_features[i] for i in self.feature_layers if i < len(real_features)]
-                    fake_features_selected = [fake_features_g[i] for i in self.feature_layers if i < len(fake_features_g)]
+                    real_features_selected = [real_features[i] for i in self.feature_layers 
+                                            if i < len(real_features)]
+                    fake_features_selected = [fake_features_g[i] for i in self.feature_layers 
+                                            if i < len(fake_features_g)]
                 else:
                     real_features_selected = real_features
                     fake_features_selected = fake_features_g
@@ -354,27 +374,87 @@ class FastGANModule(pl.LightningModule):
                 if real_features_selected and fake_features_selected:
                     fm_loss = self.feature_matching_loss(fake_features_selected, real_features_selected)
                     g_loss += self.feature_matching_weight * fm_loss
-                    self.log("train/feature_matching_loss", fm_loss, prog_bar=False)
+                    self.log("train/feature_matching_loss", fm_loss,
+                            on_step=True, on_epoch=False, prog_bar=False,
+                            logger=True, sync_dist=True)
             
             self.manual_backward(g_loss)
+            
+            # Gradient clipping for generator
+            if self.trainer.gradient_clip_val > 0:
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.generator.parameters(), 
+                    self.trainer.gradient_clip_val
+                )
+            
+            # Log generator gradient norm
+            g_grad_norm = self._get_gradient_norm(self.model.generator)
+            self.log("train/g_grad_norm", g_grad_norm,
+                    on_step=True, on_epoch=False, prog_bar=False,
+                    logger=True, sync_dist=True)
+            
             opt_g.step()
             
             # Update EMA
             if self.use_ema and self.ema_generator is not None:
                 self._update_ema()
             
-            # Logging
-            self.log("train/g_loss", g_loss, prog_bar=True)
-            self.log("train/g_loss_adv", g_loss_adv, prog_bar=False)
+            # Log generator losses
+            self.log("train/g_loss", g_loss,
+                    on_step=True, on_epoch=True, prog_bar=True,
+                    logger=True, sync_dist=True)
+            self.log("train/g_loss_adv", g_loss_adv,
+                    on_step=True, on_epoch=False, prog_bar=False,
+                    logger=True, sync_dist=True)
         
+        # ============================================
         # Logging
-        self.log("train/d_loss", d_loss, prog_bar=True)
-        self.log("train/d_loss_real", d_loss_real, prog_bar=False)
-        self.log("train/d_loss_fake", d_loss_fake, prog_bar=False)
+        # ============================================
+        
+        # Log discriminator losses
+        self.log("train/d_loss", d_loss,
+                on_step=True, on_epoch=True, prog_bar=True,
+                logger=True, sync_dist=True)
+        self.log("train/d_loss_real", d_loss_real,
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        self.log("train/d_loss_fake", d_loss_fake,
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
         
         # Log learning rates
-        self.log("train/lr_g", opt_g.param_groups[0]['lr'], prog_bar=False)
-        self.log("train/lr_d", opt_d.param_groups[0]['lr'], prog_bar=False)
+        self.log("train/lr_g", opt_g.param_groups[0]['lr'],
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        self.log("train/lr_d", opt_d.param_groups[0]['lr'],
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        
+        # Log discriminator predictions (for monitoring training balance)
+        self.log("train/d_real_mean", real_pred.mean(),
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        self.log("train/d_fake_mean", fake_pred.mean(),
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        
+        # Log image statistics
+        self.log("train/real_img_mean", real_images.mean(),
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        self.log("train/fake_img_mean", fake_images.mean(),
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        
+    def _get_gradient_norm(self, model: nn.Module) -> float:
+        """Calculate gradient norm for a model"""
+        total_norm = 0.0
+        for p in model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** 0.5
+        return total_norm
     
     def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
         """Validation step"""
@@ -408,8 +488,19 @@ class FastGANModule(pl.LightningModule):
         else:
             val_g_loss = self.adversarial_loss(fake_pred, True)
         
-        self.log("val/d_loss", val_d_loss, prog_bar=True)
-        self.log("val/g_loss", val_g_loss, prog_bar=False)
+        # Log validation losses
+        self.log("val/d_loss", val_d_loss,
+                on_step=False, on_epoch=True, prog_bar=True,
+                logger=True, sync_dist=True)
+        self.log("val/g_loss", val_g_loss,
+                on_step=False, on_epoch=True, prog_bar=False,
+                logger=True, sync_dist=True)
+        self.log("val/d_loss_real", val_d_loss_real,
+                on_step=False, on_epoch=True, prog_bar=False,
+                logger=True, sync_dist=True)
+        self.log("val/d_loss_fake", val_d_loss_fake,
+                on_step=False, on_epoch=True, prog_bar=False,
+                logger=True, sync_dist=True)
         
         return {
             "val_d_loss": val_d_loss,
@@ -424,7 +515,7 @@ class FastGANModule(pl.LightningModule):
             self._log_sample_images()
     
     def _log_sample_images(self):
-        """Log sample images to tensorboard/wandb"""
+        """Log sample images to tensorboard"""
         with torch.no_grad():
             # Generate samples with fixed noise
             num_samples = min(16, len(self.fixed_noise))
@@ -433,22 +524,40 @@ class FastGANModule(pl.LightningModule):
             else:
                 fake_images = self.model.generator(self.fixed_noise[:num_samples])
             
+            # Denormalize to [0, 1] for visualization
+            fake_images = (fake_images + 1) / 2
+            fake_images = torch.clamp(fake_images, 0, 1)
+            
             # Create grid
             grid = torchvision.utils.make_grid(
                 fake_images, 
                 nrow=4, 
-                normalize=True, 
-                value_range=(-1, 1)
+                normalize=False,  # Already normalized
+                value_range=(0, 1)
             )
             
             # Log to tensorboard
-            if self.logger:
-                if hasattr(self.logger, 'experiment'):
+            if self.logger and hasattr(self.logger, 'experiment'):
+                self.logger.experiment.add_image(
+                    "generated_images", 
+                    grid, 
+                    self.global_step
+                )
+                
+                # Also log individual samples for better inspection
+                for i in range(min(4, num_samples)):
                     self.logger.experiment.add_image(
-                        "generated_images", 
-                        grid, 
-                        self.current_epoch
+                        f"generated_samples/sample_{i}", 
+                        fake_images[i], 
+                        self.global_step
                     )
+    
+    def on_train_epoch_end(self):
+        """Called at the end of training epoch"""
+        # Log epoch number
+        self.log("epoch", float(self.current_epoch),
+                on_step=False, on_epoch=True, prog_bar=False,
+                logger=True, sync_dist=True)
     
     def configure_optimizers(self):
         """Configure optimizers and schedulers"""
@@ -468,16 +577,55 @@ class FastGANModule(pl.LightningModule):
             weight_decay=self.hparams.weight_decay
         )
         
-        return [g_optimizer, d_optimizer]
+        optimizers = [g_optimizer, d_optimizer]
+        
+        # Optional: Add schedulers
+        schedulers = []
+        
+        # Example: Linear warmup and decay
+        if hasattr(self.hparams, 'use_scheduler') and self.hparams.use_scheduler:
+            g_scheduler = {
+                'scheduler': LinearLR(
+                    g_optimizer,
+                    start_factor=0.1,
+                    total_iters=self.hparams.warmup_epochs
+                ),
+                'interval': 'epoch',
+                'frequency': 1
+            }
+            d_scheduler = {
+                'scheduler': LinearLR(
+                    d_optimizer,
+                    start_factor=0.1,
+                    total_iters=self.hparams.warmup_epochs
+                ),
+                'interval': 'epoch',
+                'frequency': 1
+            }
+            schedulers = [g_scheduler, d_scheduler]
+        
+        if schedulers:
+            return optimizers, schedulers
+        else:
+            return optimizers
     
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         """Save additional state"""
+        # Save EMA state
         if self.use_ema and self.ema_generator is not None:
             checkpoint['ema_generator_state_dict'] = self.ema_generator.state_dict()
+        
+        # Save global step
+        checkpoint['global_train_step'] = self.global_train_step
     
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
         """Load additional state"""
+        # Load EMA state
         if self.use_ema and 'ema_generator_state_dict' in checkpoint:
             if self.ema_generator is None:
                 self.ema_generator = self._create_ema_model()
             self.ema_generator.load_state_dict(checkpoint['ema_generator_state_dict'])
+        
+        # Load global step
+        if 'global_train_step' in checkpoint:
+            self.global_train_step = checkpoint['global_train_step']
