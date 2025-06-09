@@ -196,29 +196,47 @@ def setup_callbacks(cfg: DictConfig) -> List[pl.callbacks.Callback]:
     callbacks.append(lr_monitor)
     
     # Progress bar (Rich or default)
-    try:
-        rich_progress = RichProgressBar(
-            leave=cfg.get('callbacks', {}).get('rich_progress_bar', {}).get('leave', True),
-            theme=cfg.get('callbacks', {}).get('rich_progress_bar', {}).get('theme', None)
-        )
-        callbacks.append(rich_progress)
-    except ImportError:
-        logger.info("Rich progress bar not available, using default")
+    # Check if rich_progress_bar is not disabled (null)
+    rich_progress_config = cfg.get('callbacks', {}).get('rich_progress_bar')
+    if rich_progress_config is not None and cfg.get('enable_progress_bar', True):
+        try:
+            # Handle case where rich_progress_config might be a dict or other value
+            if isinstance(rich_progress_config, dict):
+                rich_progress = RichProgressBar(
+                    leave=rich_progress_config.get('leave', True),
+                    theme=rich_progress_config.get('theme', None)
+                )
+            else:
+                # Use defaults if it's not a dict
+                rich_progress = RichProgressBar()
+            callbacks.append(rich_progress)
+        except ImportError:
+            logger.info("Rich progress bar not available, using default")
     
     # Model summary (Rich or default)
-    try:
-        model_summary = RichModelSummary(
-            max_depth=cfg.get('callbacks', {}).get('model_summary', {}).get('max_depth', 2)
-        )
-        callbacks.append(model_summary)
-    except ImportError:
+    # Check if rich_model_summary is not disabled (null)
+    model_summary_config = cfg.get('callbacks', {}).get('model_summary', {})
+    rich_model_summary_config = cfg.get('callbacks', {}).get('rich_model_summary')
+    
+    if rich_model_summary_config is not None and cfg.get('enable_model_summary', True):
+        try:
+            model_summary = RichModelSummary(
+                max_depth=model_summary_config.get('max_depth', 2)
+            )
+            callbacks.append(model_summary)
+        except ImportError:
+            model_summary = ModelSummary(
+                max_depth=model_summary_config.get('max_depth', 2)
+            )
+            callbacks.append(model_summary)
+    elif cfg.get('enable_model_summary', True):
+        # Use regular model summary if rich is disabled
         model_summary = ModelSummary(
-            max_depth=cfg.get('callbacks', {}).get('model_summary', {}).get('max_depth', 2)
+            max_depth=model_summary_config.get('max_depth', 2)
         )
         callbacks.append(model_summary)
     
     return callbacks
-
 
 def create_trainer(cfg: DictConfig, logger_instance, callbacks: List) -> pl.Trainer:
     """Create PyTorch Lightning trainer

@@ -591,8 +591,7 @@ class TrainingManager:
                 f"data.batch_size={batch_size}",
                 f"data.num_workers={num_workers}",
                 f"max_epochs={max_epochs}",
-                "gradient_clip_val=0",  # Disable gradient clipping for manual optimization
-                "enable_progress_bar=false"  # Disable progress bar to avoid bugs
+                "gradient_clip_val=0"  # Disable gradient clipping for manual optimization
             ])
             
             if use_wandb:
