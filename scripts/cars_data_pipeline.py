@@ -184,7 +184,8 @@ class CARSDataPipeline:
                        seed: int = 42,
                        percentile_low: float = 0.1,
                        percentile_high: float = 99.9,
-                       use_log_transform: bool = False) -> Dict:
+                       use_log_transform: bool = False,
+                       denoise_method: str = None) -> Dict:
         """Prepare dataset with proper conversion and splitting
         
         Args:
@@ -289,6 +290,18 @@ class CARSDataPipeline:
                     elif img.dtype != np.uint8 and use_8bit:
                         # Handle other dtypes
                         img = img.astype(np.uint8)
+                    
+                    # Apply gentle denoising if requested (after normalization)
+                    if denoise_method and img.dtype == np.uint8:
+                        if denoise_method == 'bilateral':
+                            # Bilateral filter - preserves edges while smoothing
+                            img = cv2.bilateralFilter(img, d=5, sigmaColor=20, sigmaSpace=20)
+                        elif denoise_method == 'nlm':
+                            # Non-local means - good for texture preservation
+                            img = cv2.fastNlMeansDenoising(img, h=10, templateWindowSize=7, searchWindowSize=21)
+                        elif denoise_method == 'median':
+                            # Median filter - good for salt-and-pepper noise
+                            img = cv2.medianBlur(img, 3)
                     
                     # Ensure grayscale
                     if len(img.shape) == 3:
