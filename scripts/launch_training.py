@@ -221,7 +221,7 @@ class TrainingLauncher:
         
         cmd = ["python", "main.py"]
         
-        # Add configuration overrides
+        # Add configuration overrides using the actual config structure
         for key, value in config.items():
             if key == 'model' and isinstance(value, dict):
                 for sub_key, sub_value in value.items():
@@ -233,8 +233,20 @@ class TrainingLauncher:
             elif key == 'data' and isinstance(value, dict):
                 for sub_key, sub_value in value.items():
                     cmd.append(f"data.{sub_key}={sub_value}")
-            elif key in ['experiment_name', 'data_path', 'max_epochs', 'use_wandb']:
-                cmd.append(f"{key}={value}")
+            elif key == 'experiment_name':
+                cmd.append(f"experiment_name={value}")
+            elif key == 'data_path':
+                cmd.append(f"data_path={value}")
+            elif key == 'training' and isinstance(value, dict):
+                for sub_key, sub_value in value.items():
+                    if sub_key == 'max_epochs':
+                        cmd.append(f"max_epochs={sub_value}")
+                    else:
+                        cmd.append(f"{sub_key}={sub_value}")
+            elif key == 'use_wandb':
+                cmd.append(f"use_wandb={value}")
+        
+        return cmd
         
         return cmd
     
@@ -273,7 +285,7 @@ class TrainingLauncher:
         print(f"\n📋 Training Configuration:")
         print(f"   - Data path: {config['data_path']}")
         print(f"   - Experiment: {config['experiment_name']}")
-        print(f"   - Max epochs: {config['max_epochs']}")
+        print(f"   - Max epochs: {config.get('max_epochs', 1000)}")
         print(f"   - Weights & Biases: {'Enabled' if config['use_wandb'] else 'Disabled'}")
         
         print(f"\n🖥️  Training Command:")

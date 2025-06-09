@@ -69,9 +69,8 @@ class CARSMicroscopyDataset(Dataset):
         """Get default image transforms using Albumentations"""
         transform_list = []
         
-        # Resize if needed
-        if self.image_size != 512:  # Assuming original is 512x512
-            transform_list.append(A.Resize(self.image_size, self.image_size))
+        # Always ensure correct size first
+        transform_list.append(A.Resize(self.image_size, self.image_size, interpolation=cv2.INTER_AREA))
         
         # Augmentations for training
         if self.augment:
@@ -135,6 +134,10 @@ class CARSMicroscopyDataset(Dataset):
             if len(img.shape) == 3:
                 img = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
+            # CRITICAL: Always resize to target size
+            if img.shape[0] != self.image_size or img.shape[1] != self.image_size:
+                img = cv2.resize(img, (self.image_size, self.image_size), interpolation=cv2.INTER_AREA)
+            
             return img
             
         except Exception as e:
@@ -174,6 +177,18 @@ class CARSMicroscopyDataset(Dataset):
             'path': str(image_path),
             'index': idx
         }
+
+
+class PathBasedCARSDataset(CARSMicroscopyDataset):
+    """Dataset that works with pre-defined image paths"""
+    
+    def __init__(self, image_paths, image_size, use_8bit, augment, split):
+        self.image_paths = image_paths
+        self.image_size = image_size
+        self.use_8bit = use_8bit
+        self.augment = augment
+        self.split = split
+        self.transform = self._get_default_transforms()
 
 
 class CARSDataModule(pl.LightningDataModule):
@@ -286,8 +301,7 @@ class CARSDataModule(pl.LightningDataModule):
         self.val_paths = val_paths
         self.test_paths = test_paths
         
-        # Create temporary directories with split data (or use custom dataset)
-        # For simplicity, we'll pass the paths directly to the dataset
+        # Create datasets
         if stage == "fit" or stage is None:
             self.train_dataset = self._create_dataset_from_paths(
                 train_paths, "train", self.augment_train
@@ -303,17 +317,7 @@ class CARSDataModule(pl.LightningDataModule):
     
     def _create_dataset_from_paths(self, paths: List[Path], split: str, augment: bool):
         """Create a dataset from a list of image paths"""
-        # Create a temporary dataset class that uses the provided paths
-        class PathBasedDataset(CARSMicroscopyDataset):
-            def __init__(self, paths, image_size, use_8bit, augment, split):
-                self.image_paths = paths
-                self.image_size = image_size
-                self.use_8bit = use_8bit
-                self.augment = augment
-                self.split = split
-                self.transform = self._get_default_transforms()
-        
-        return PathBasedDataset(paths, self.image_size, self.use_8bit, augment, split)
+        return PathBasedCARSDataset(paths, self.image_size, self.use_8bit, augment, split)
     
     def train_dataloader(self) -> DataLoader:
         """Create training dataloader"""

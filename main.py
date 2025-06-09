@@ -27,19 +27,19 @@ def setup_logging(cfg: DictConfig) -> pl.loggers.Logger:
     # TensorBoard logger
     tb_logger = TensorBoardLogger(
         save_dir=cfg.log_dir,
-        name=cfg.experiment.name,
-        version=cfg.experiment.version
+        name=cfg.get('experiment_name', 'fastgan_experiment'),
+        version=cfg.get('experiment', {}).get('version', None)
     )
     loggers.append(tb_logger)
     
     # Weights & Biases logger
-    if cfg.use_wandb and cfg.wandb.project:
+    if cfg.use_wandb and cfg.get('wandb', {}).get('project'):
         try:
             wandb_logger = WandbLogger(
                 project=cfg.wandb.project,
-                entity=cfg.wandb.entity,
-                name=f"{cfg.experiment.name}_{cfg.experiment.version or 'auto'}",
-                tags=cfg.wandb.tags,
+                entity=cfg.get('wandb', {}).get('entity'),
+                name=f"{cfg.get('experiment_name', 'fastgan')}_{cfg.get('experiment', {}).get('version', 'auto')}",
+                tags=cfg.get('wandb', {}).get('tags', []),
                 save_dir=cfg.log_dir
             )
             loggers.append(wandb_logger)
@@ -57,31 +57,32 @@ def setup_callbacks(cfg: DictConfig) -> list:
     # Model checkpointing
     checkpoint_callback = ModelCheckpoint(
         dirpath=cfg.checkpoint_dir,
-        filename=cfg.callbacks.model_checkpoint.filename,
-        monitor=cfg.callbacks.model_checkpoint.monitor,
-        mode=cfg.callbacks.model_checkpoint.mode,
-        save_top_k=cfg.callbacks.model_checkpoint.save_top_k,
-        auto_insert_metric_name=cfg.callbacks.model_checkpoint.auto_insert_metric_name,
+        filename=cfg.get('callbacks', {}).get('model_checkpoint', {}).get('filename', 'fastgan-{epoch:02d}'),
+        monitor=cfg.get('callbacks', {}).get('model_checkpoint', {}).get('monitor', 'val/d_loss'),
+        mode=cfg.get('callbacks', {}).get('model_checkpoint', {}).get('mode', 'min'),
+        save_top_k=cfg.get('callbacks', {}).get('model_checkpoint', {}).get('save_top_k', 3),
+        auto_insert_metric_name=cfg.get('callbacks', {}).get('model_checkpoint', {}).get('auto_insert_metric_name', False),
         save_last=True,
         verbose=True
     )
     callbacks.append(checkpoint_callback)
     
     # Early stopping
-    if cfg.callbacks.early_stopping.patience > 0:
+    early_stopping_patience = cfg.get('callbacks', {}).get('early_stopping', {}).get('patience', 0)
+    if early_stopping_patience > 0:
         early_stopping = EarlyStopping(
-            monitor=cfg.callbacks.early_stopping.monitor,
-            mode=cfg.callbacks.early_stopping.mode,
-            patience=cfg.callbacks.early_stopping.patience,
-            min_delta=cfg.callbacks.early_stopping.min_delta,
+            monitor=cfg.get('callbacks', {}).get('early_stopping', {}).get('monitor', 'val/d_loss'),
+            mode=cfg.get('callbacks', {}).get('early_stopping', {}).get('mode', 'min'),
+            patience=early_stopping_patience,
+            min_delta=cfg.get('callbacks', {}).get('early_stopping', {}).get('min_delta', 0.01),
             verbose=True
         )
         callbacks.append(early_stopping)
     
     # Learning rate monitoring
     lr_monitor = LearningRateMonitor(
-        logging_interval=cfg.callbacks.lr_monitor.logging_interval,
-        log_momentum=cfg.callbacks.lr_monitor.log_momentum
+        logging_interval=cfg.get('callbacks', {}).get('lr_monitor', {}).get('logging_interval', 'epoch'),
+        log_momentum=cfg.get('callbacks', {}).get('lr_monitor', {}).get('log_momentum', False)
     )
     callbacks.append(lr_monitor)
     
@@ -89,7 +90,7 @@ def setup_callbacks(cfg: DictConfig) -> list:
     try:
         from pytorch_lightning.callbacks import RichProgressBar
         rich_progress = RichProgressBar(
-            leave=cfg.callbacks.rich_progress_bar.leave
+            leave=cfg.get('callbacks', {}).get('rich_progress_bar', {}).get('leave', True)
         )
         callbacks.append(rich_progress)
     except ImportError:
@@ -99,13 +100,13 @@ def setup_callbacks(cfg: DictConfig) -> list:
     try:
         from pytorch_lightning.callbacks import RichModelSummary
         model_summary = RichModelSummary(
-            max_depth=cfg.callbacks.model_summary.max_depth
+            max_depth=cfg.get('callbacks', {}).get('model_summary', {}).get('max_depth', 2)
         )
         callbacks.append(model_summary)
     except ImportError:
         from pytorch_lightning.callbacks import ModelSummary
         model_summary = ModelSummary(
-            max_depth=cfg.callbacks.model_summary.max_depth
+            max_depth=cfg.get('callbacks', {}).get('model_summary', {}).get('max_depth', 2)
         )
         callbacks.append(model_summary)
     
@@ -116,7 +117,8 @@ def create_trainer(cfg: DictConfig, logger, callbacks: list) -> pl.Trainer:
     """Create PyTorch Lightning trainer"""
     
     # Determine accelerator and devices
-    if cfg.accelerator == "auto":
+    accelerator = cfg.get('accelerator', 'auto')
+    if accelerator == "auto":
         if torch.cuda.is_available():
             accelerator = "gpu"
             devices = 1
@@ -127,8 +129,7 @@ def create_trainer(cfg: DictConfig, logger, callbacks: list) -> pl.Trainer:
             accelerator = "cpu"
             devices = 1
     else:
-        accelerator = cfg.accelerator
-        devices = cfg.devices
+        devices = cfg.get('devices', 1)
     
     print(f"Using accelerator: {accelerator}, devices: {devices}")
     
@@ -136,38 +137,43 @@ def create_trainer(cfg: DictConfig, logger, callbacks: list) -> pl.Trainer:
     trainer_args = {
         "accelerator": accelerator,
         "devices": devices,
-        "max_epochs": cfg.max_epochs,
-        "min_epochs": cfg.min_epochs,
-        "precision": cfg.precision,
+        "max_epochs": cfg.get('max_epochs', 1000),
+        "min_epochs": cfg.get('min_epochs', 1),
+        "precision": cfg.get('precision', '32-true'),
         "logger": logger,
         "callbacks": callbacks,
-        "enable_checkpointing": cfg.enable_checkpointing,
-        "enable_model_summary": cfg.enable_model_summary,
-        "enable_progress_bar": cfg.enable_progress_bar,
-        "val_check_interval": cfg.val_check_interval,
-        "check_val_every_n_epoch": cfg.check_val_every_n_epoch,
-        "log_every_n_steps": cfg.log_every_n_steps,
-        "gradient_clip_val": cfg.gradient_clip_val,
-        "gradient_clip_algorithm": cfg.gradient_clip_algorithm,
-        "accumulate_grad_batches": cfg.accumulate_grad_batches,
-        "deterministic": cfg.deterministic,
-        "benchmark": cfg.benchmark,
-        "detect_anomaly": cfg.detect_anomaly,
+        "enable_checkpointing": cfg.get('enable_checkpointing', True),
+        "enable_model_summary": cfg.get('enable_model_summary', True),
+        "enable_progress_bar": cfg.get('enable_progress_bar', True),
+        "val_check_interval": cfg.get('val_check_interval', 1.0),
+        "check_val_every_n_epoch": cfg.get('check_val_every_n_epoch', 1),
+        "log_every_n_steps": cfg.get('log_every_n_steps', 50),
+        "gradient_clip_val": cfg.get('gradient_clip_val', None),
+        "gradient_clip_algorithm": cfg.get('gradient_clip_algorithm', 'norm'),
+        "accumulate_grad_batches": cfg.get('accumulate_grad_batches', 1),
+        "deterministic": cfg.get('deterministic', True),
+        "benchmark": cfg.get('benchmark', False),
+        "detect_anomaly": cfg.get('detect_anomaly', False),
     }
     
     # Add profiler if specified
-    if cfg.profiler:
-        trainer_args["profiler"] = cfg.profiler
+    profiler = cfg.get('profiler', None)
+    if profiler:
+        trainer_args["profiler"] = profiler
     
     # Debug settings
-    if cfg.debug.fast_dev_run:
+    debug = cfg.get('debug', {})
+    if isinstance(debug, dict):
+        if debug.get('fast_dev_run', False):
+            trainer_args["fast_dev_run"] = True
+        if debug.get('limit_train_batches'):
+            trainer_args["limit_train_batches"] = debug['limit_train_batches']
+        if debug.get('limit_val_batches'):
+            trainer_args["limit_val_batches"] = debug['limit_val_batches']
+        if debug.get('overfit_batches', 0) > 0:
+            trainer_args["overfit_batches"] = debug['overfit_batches']
+    elif debug:  # If debug is True (boolean)
         trainer_args["fast_dev_run"] = True
-    if cfg.debug.limit_train_batches:
-        trainer_args["limit_train_batches"] = cfg.debug.limit_train_batches
-    if cfg.debug.limit_val_batches:
-        trainer_args["limit_val_batches"] = cfg.debug.limit_val_batches
-    if cfg.debug.overfit_batches > 0:
-        trainer_args["overfit_batches"] = cfg.debug.overfit_batches
     
     return pl.Trainer(**trainer_args)
 
@@ -258,7 +264,7 @@ def main(cfg: DictConfig) -> None:
     datamodule = CARSDataModule(
         data_path=cfg.data_path,
         batch_size=cfg.data.batch_size,
-        num_workers=cfg.data.num_workers,
+        num_workers=0,  # Set to 0 to avoid multiprocessing issues
         image_size=cfg.data.image_size,
         use_8bit=cfg.data.use_8bit,
         train_ratio=cfg.data.train_ratio,
@@ -297,36 +303,36 @@ def main(cfg: DictConfig) -> None:
         norm_type=cfg.model.generator.norm_type,
         
         # Loss configuration
-        gan_loss=cfg.model.loss.gan_loss,
-        adversarial_weight=cfg.model.loss.adversarial_weight,
-        feature_matching_weight=cfg.model.loss.feature_matching_weight,
-        use_feature_matching=cfg.model.loss.use_feature_matching,
-        feature_layers=cfg.model.loss.feature_layers,
+        gan_loss=cfg.get('model', {}).get('loss', {}).get('gan_loss', 'hinge'),
+        adversarial_weight=cfg.get('model', {}).get('loss', {}).get('adversarial_weight', 1.0),
+        feature_matching_weight=cfg.get('model', {}).get('loss', {}).get('feature_matching_weight', 10.0),
+        use_feature_matching=cfg.get('model', {}).get('loss', {}).get('use_feature_matching', True),
+        feature_layers=cfg.get('model', {}).get('loss', {}).get('feature_layers', [2, 3, 4]),
         
         # Optimization
-        generator_lr=cfg.model.optimizer.generator.lr,
-        discriminator_lr=cfg.model.optimizer.discriminator.lr,
-        beta1=cfg.model.optimizer.generator.betas[0],
-        beta2=cfg.model.optimizer.generator.betas[1],
-        weight_decay=cfg.model.optimizer.generator.weight_decay,
+        generator_lr=cfg.get('model', {}).get('optimizer', {}).get('generator', {}).get('lr', 0.0002),
+        discriminator_lr=cfg.get('model', {}).get('optimizer', {}).get('discriminator', {}).get('lr', 0.0002),
+        beta1=cfg.get('model', {}).get('optimizer', {}).get('generator', {}).get('betas', [0.0, 0.999])[0],
+        beta2=cfg.get('model', {}).get('optimizer', {}).get('generator', {}).get('betas', [0.0, 0.999])[1],
+        weight_decay=cfg.get('model', {}).get('optimizer', {}).get('generator', {}).get('weight_decay', 0.0),
         
         # Training
-        n_critic=cfg.model.training.n_critic,
-        use_gradient_penalty=cfg.model.training.use_gradient_penalty,
-        gradient_penalty_weight=cfg.model.training.gradient_penalty_weight,
-        use_ema=cfg.model.training.use_ema,
-        ema_decay=cfg.model.training.ema_decay,
+        n_critic=cfg.get('model', {}).get('training', {}).get('n_critic', 1),
+        use_gradient_penalty=cfg.get('model', {}).get('training', {}).get('use_gradient_penalty', False),
+        gradient_penalty_weight=cfg.get('model', {}).get('training', {}).get('gradient_penalty_weight', 10.0),
+        use_ema=cfg.get('model', {}).get('training', {}).get('use_ema', False),
+        ema_decay=cfg.get('model', {}).get('training', {}).get('ema_decay', 0.999),
         
         # Logging
-        log_images_every_n_epochs=cfg.log_images_every_n_epochs,
-        num_sample_images=cfg.num_sample_images,
-        fixed_noise_size=cfg.gan_training.fixed_noise_size,
+        log_images_every_n_epochs=cfg.get('log_images_every_n_epochs', 25),
+        num_sample_images=cfg.get('num_sample_images', 16),
+        fixed_noise_size=cfg.get('gan_training', {}).get('fixed_noise_size', 64),
         
         # Evaluation
-        compute_fid=cfg.evaluation.metrics.fid.enabled,
-        compute_lpips=cfg.evaluation.metrics.lpips.enabled,
-        fid_batch_size=cfg.evaluation.metrics.fid.batch_size,
-        fid_num_samples=cfg.evaluation.metrics.fid.num_samples
+        compute_fid=cfg.get('evaluation', {}).get('metrics', {}).get('fid', {}).get('enabled', True),
+        compute_lpips=cfg.get('evaluation', {}).get('metrics', {}).get('lpips', {}).get('enabled', True),
+        fid_batch_size=cfg.get('evaluation', {}).get('metrics', {}).get('fid', {}).get('batch_size', 50),
+        fid_num_samples=cfg.get('evaluation', {}).get('metrics', {}).get('fid', {}).get('num_samples', 1000)
     )
     
     # Setup logging and callbacks
