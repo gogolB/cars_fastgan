@@ -596,12 +596,7 @@ class TrainingManager:
             elif key == 'data_path':
                 cmd.append(f"data_path={value}")
             elif key == 'model':
-                for sub_key, sub_value in value.items():
-                    if isinstance(sub_value, dict):
-                        for sub_sub_key, sub_sub_value in sub_value.items():
-                            cmd.append(f"model.{sub_key}.{sub_sub_key}={sub_sub_value}")
-                    else:
-                        cmd.append(f"model.{sub_key}={sub_value}")
+                self._add_model_overrides(cmd, value)
             elif key == 'data':
                 for sub_key, sub_value in value.items():
                     cmd.append(f"data.{sub_key}={sub_value}")
@@ -619,6 +614,30 @@ class TrainingManager:
                         cmd.append(f"callbacks.{cb_key}.{param_key}={param_value}")
         
         return cmd
+    
+    def _add_model_overrides(self, cmd: List[str], model_config: Dict[str, Any]):
+        """Add model configuration overrides handling special cases"""
+        for sub_key, sub_value in model_config.items():
+            if isinstance(sub_value, dict):
+                for sub_sub_key, sub_sub_value in sub_value.items():
+                    # Handle special cases like lists and complex values
+                    if isinstance(sub_sub_value, list):
+                        # Skip lists like betas - they should be in config files
+                        # or convert to string format Hydra can understand
+                        if sub_sub_key == 'betas':
+                            # Skip betas as they're already in the config file
+                            continue
+                        elif sub_sub_key == 'feature_layers':
+                            # Feature layers can be passed as a string
+                            layers_str = ','.join(map(str, sub_sub_value))
+                            cmd.append(f"model.{sub_key}.{sub_sub_key}=[{layers_str}]")
+                    elif isinstance(sub_sub_value, bool):
+                        # Convert boolean to lowercase string
+                        cmd.append(f"model.{sub_key}.{sub_sub_key}={str(sub_sub_value).lower()}")
+                    else:
+                        cmd.append(f"model.{sub_key}.{sub_sub_key}={sub_sub_value}")
+            else:
+                cmd.append(f"model.{sub_key}={sub_value}")
     
     def get_model_config(self, model_size: str) -> Dict[str, Any]:
         """Get model configuration by size"""
