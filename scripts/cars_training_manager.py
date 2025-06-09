@@ -491,7 +491,9 @@ class TrainingManager:
         device: str = 'auto',
         num_workers: int = 4,
         resume_checkpoint: Optional[str] = None,
-        dry_run: bool = False
+        dry_run: bool = False,
+        check_val_every_n_epoch: Optional[int] = None,
+        log_images_every_n_epochs: Optional[int] = None
     ) -> bool:
         """Launch training with specified configuration"""
         
@@ -515,6 +517,13 @@ class TrainingManager:
                 num_workers=num_workers
             )
         
+        # Add validation and image logging settings if provided
+        if check_val_every_n_epoch is not None:
+            config['check_val_every_n_epoch'] = check_val_every_n_epoch
+        
+        if log_images_every_n_epochs is not None:
+            config['log_images_every_n_epochs'] = log_images_every_n_epochs
+        
         # Apply optimization results if available and batch_size not explicitly set
         if optimization_results and batch_size is None:
             optimized_config = self._apply_optimization_results(config, optimization_results)
@@ -527,9 +536,9 @@ class TrainingManager:
         # Build command
         cmd = self.build_launch_command(config)
         
-        # Add resume checkpoint if provided
+        # Add resume checkpoint if provided (use + prefix for new key)
         if resume_checkpoint:
-            cmd.append(f"resume_from_checkpoint={resume_checkpoint}")
+            cmd.append(f"+resume_from_checkpoint={resume_checkpoint}")
         
         # Save configuration
         self.save_configuration(config)
@@ -590,6 +599,13 @@ class TrainingManager:
         if config.get('preset_name') == 'improved':
             cmd.append("model=fastgan_improved")
         
+        # Special handling for small_dataset preset
+        if config.get('preset_name') == 'small_dataset':
+            # Use the improved model config as base
+            cmd.append("model=fastgan_improved")
+            # Override EMA decay
+            cmd.append("model.training.ema_decay=0.95")
+        
         # Add model configuration
         self._add_model_config_to_cmd(cmd, config)
         
@@ -618,6 +634,13 @@ class TrainingManager:
         # Add device configuration
         if config.get('device'):
             cmd.append(f"accelerator={config['device']}")
+        
+        # Add validation and image logging overrides if specified
+        if 'check_val_every_n_epoch' in config and config['check_val_every_n_epoch'] is not None:
+            cmd.append(f"check_val_every_n_epoch={config['check_val_every_n_epoch']}")
+        
+        if 'log_images_every_n_epochs' in config and config['log_images_every_n_epochs'] is not None:
+            cmd.append(f"log_images_every_n_epochs={config['log_images_every_n_epochs']}")
         
         # Add any extra overrides (with + prefix for new keys)
         if 'extra_overrides' in config:
@@ -907,6 +930,20 @@ class TrainingManager:
                     'feature_matching_weight': 30.0,
                     'perceptual_weight': 10.0
                 }
+            },
+            'small_dataset': {
+                'description': 'Optimized for small datasets like CARS microscopy',
+                'model_size': 'standard',
+                'batch_size': 8,  # Smaller batch for more updates per epoch
+                'max_epochs': 2000,
+                'loss': {
+                    'gan_loss': 'hinge',
+                    'feature_matching_weight': 20.0
+                },
+                'optimizer': {
+                    'generator': {'lr': 0.0001},
+                    'discriminator': {'lr': 0.0004}
+                }
             }
         }
     
@@ -993,6 +1030,9 @@ Examples:
   # Launch with specific preset
   python cars_training_manager.py --preset improved --data_path data/processed
   
+  # Launch with small_dataset preset (recommended for CARS)
+  python cars_training_manager.py --preset small_dataset --data_path data/processed
+  
   # Launch multiple experiments
   python cars_training_manager.py --experiments micro standard large --data_path data/processed
   
@@ -1008,10 +1048,10 @@ Examples:
     # Experiment configuration
     parser.add_argument('--experiment_name', type=str, default=None,
                        help='Experiment name (auto-generated if not provided)')
-    parser.add_argument('--preset', type=str, choices=['baseline', 'improved', 'fast', 'high_quality'],
+    parser.add_argument('--preset', type=str, choices=['baseline', 'improved', 'fast', 'high_quality', 'small_dataset'],
                        help='Use a predefined configuration preset')
     
-    # Model configuration
+    # Training configuration
     parser.add_argument('--model_size', type=str, default='standard',
                        choices=['micro', 'small', 'standard', 'large', 'xlarge'],
                        help='Model size configuration')
@@ -1019,6 +1059,10 @@ Examples:
                        help='Batch size (auto-determined if not specified)')
     parser.add_argument('--max_epochs', type=int, default=1000,
                        help='Maximum training epochs')
+    parser.add_argument('--check_val_every_n_epoch', type=int, default=None,
+                       help='Run validation every N epochs (default from config)')
+    parser.add_argument('--log_images_every_n_epochs', type=int, default=None,
+                       help='Log generated images every N epochs (default from config)')
     
     # Hardware configuration
     parser.add_argument('--device', type=str, default='auto',
@@ -1109,7 +1153,9 @@ Examples:
         device=args.device,
         num_workers=args.num_workers,
         resume_checkpoint=args.resume_checkpoint,
-        dry_run=args.dry_run
+        dry_run=args.dry_run,
+        check_val_every_n_epoch=args.check_val_every_n_epoch,
+        log_images_every_n_epochs=args.log_images_every_n_epochs
     )
     
     if success and not args.dry_run:

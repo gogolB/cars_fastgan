@@ -514,25 +514,71 @@ class FastGANModule(pl.LightningModule):
         if self.current_epoch % self.hparams.log_images_every_n_epochs == 0:
             self._log_sample_images()
     
+    
+
     def _log_sample_images(self):
-        """Log sample images to tensorboard"""
+        """Log sample images to tensorboard with diagnostics"""
         with torch.no_grad():
             # Generate samples with fixed noise
             num_samples = min(16, len(self.fixed_noise))
+            
+            # Generate from BOTH generators
             if self.use_ema and self.ema_generator is not None:
-                fake_images = self.ema_generator(self.fixed_noise[:num_samples])
+                fake_images_ema = self.ema_generator(self.fixed_noise[:num_samples])
+                print(f"\n[DIAGNOSTIC] Epoch {self.current_epoch}")
+                print(f"EMA Generator raw output - min: {fake_images_ema.min():.3f}, max: {fake_images_ema.max():.3f}, mean: {fake_images_ema.mean():.3f}")
             else:
-                fake_images = self.model.generator(self.fixed_noise[:num_samples])
+                fake_images_ema = None
+                
+            # Always generate from regular generator too
+            fake_images_regular = self.model.generator(self.fixed_noise[:num_samples])
+            print(f"Regular Generator raw output - min: {fake_images_regular.min():.3f}, max: {fake_images_regular.max():.3f}, mean: {fake_images_regular.mean():.3f}")
+            
+            # Use EMA if available, otherwise regular
+            fake_images = fake_images_ema if fake_images_ema is not None else fake_images_regular
             
             # Denormalize to [0, 1] for visualization
-            fake_images = (fake_images + 1) / 2
-            fake_images = torch.clamp(fake_images, 0, 1)
+            fake_images_display = (fake_images + 1) / 2
+            fake_images_display = torch.clamp(fake_images_display, 0, 1)
             
-            # Create grid
+            print(f"After denormalization - min: {fake_images_display.min():.3f}, max: {fake_images_display.max():.3f}, mean: {fake_images_display.mean():.3f}")
+            
+            # Also generate with NEW random noise to see if it's the fixed noise causing issues
+            new_noise = torch.randn_like(self.fixed_noise[:4])
+            if self.use_ema and self.ema_generator is not None:
+                fake_new = self.ema_generator(new_noise)
+            else:
+                fake_new = self.model.generator(new_noise)
+            fake_new_display = torch.clamp((fake_new + 1) / 2, 0, 1)
+            print(f"New random noise - min: {fake_new_display.min():.3f}, max: {fake_new_display.max():.3f}, mean: {fake_new_display.mean():.3f}")
+            
+            # Create comparison grid
+            if fake_images_ema is not None:
+                # Show both EMA and regular
+                ema_display = torch.clamp((fake_images_ema + 1) / 2, 0, 1)
+                regular_display = torch.clamp((fake_images_regular + 1) / 2, 0, 1)
+                
+                # Stack for comparison: top row = EMA, bottom row = regular
+                comparison = torch.cat([
+                    ema_display[:4],
+                    regular_display[:4],
+                    fake_new_display
+                ], dim=0)
+                
+                comparison_grid = torchvision.utils.make_grid(comparison, nrow=4)
+                
+                if self.logger and hasattr(self.logger, 'experiment'):
+                    self.logger.experiment.add_image(
+                        "comparison/ema_vs_regular_vs_new", 
+                        comparison_grid, 
+                        self.global_step
+                    )
+            
+            # Create main grid
             grid = torchvision.utils.make_grid(
-                fake_images, 
+                fake_images_display, 
                 nrow=4, 
-                normalize=False,  # Already normalized
+                normalize=False,
                 value_range=(0, 1)
             )
             
@@ -548,7 +594,7 @@ class FastGANModule(pl.LightningModule):
                 for i in range(min(4, num_samples)):
                     self.logger.experiment.add_image(
                         f"generated_samples/sample_{i}", 
-                        fake_images[i], 
+                        fake_images_display[i], 
                         self.global_step
                     )
     

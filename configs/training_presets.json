@@ -1,0 +1,228 @@
+{
+  "presets": {
+    "baseline": {
+      "description": "Baseline FASTGAN configuration",
+      "model_size": "standard",
+      "batch_size": 8,
+      "max_epochs": 1000,
+      "loss": {
+        "gan_loss": "hinge",
+        "feature_matching_weight": 10.0
+      },
+    "visual_inspection": {
+      "description": "Frequent image logging for visual quality assessment",
+      "model_size": "standard",
+      "batch_size": 8,
+      "max_epochs": 2000,
+      "loss": {
+        "gan_loss": "hinge",
+        "feature_matching_weight": 20.0
+      },
+      "optimizer": {
+        "generator": {
+          "lr": 0.0001
+        },
+        "discriminator": {
+          "lr": 0.0004
+        }
+      },
+      "model": {
+        "training": {
+          "ema_decay": 0.95,
+          "use_ema": true
+        }
+      },
+      "callbacks": {
+        "model_checkpoint": {
+          "monitor": "val/g_loss",
+          "mode": "min",
+          "filename": "fastgan-{epoch:04d}",
+          "save_top_k": -1,
+          "every_n_epochs": 100
+        }
+      },
+      "check_val_every_n_epoch": 5,
+      "log_images_every_n_epochs": 5
+    },
+      "optimizer": {
+        "generator": {
+          "lr": 0.0002
+        },
+        "discriminator": {
+          "lr": 0.0002
+        }
+      }
+    },
+    "improved": {
+      "description": "Improved configuration with better stability",
+      "model_size": "standard",
+      "batch_size": 16,
+      "max_epochs": 1500,
+      "loss": {
+        "gan_loss": "hinge",
+        "feature_matching_weight": 20.0
+      },
+      "optimizer": {
+        "generator": {
+          "lr": 0.0001
+        },
+        "discriminator": {
+          "lr": 0.0004
+        }
+      }
+    },
+    "fast": {
+      "description": "Fast training for quick experiments",
+      "model_size": "micro",
+      "batch_size": 32,
+      "max_epochs": 500,
+      "training": {
+        "log_images_every_n_epochs": 10,
+        "val_check_interval": 50
+      }
+    },
+    "high_quality": {
+      "description": "High quality with large model",
+      "model_size": "large",
+      "batch_size": 8,
+      "max_epochs": 2000,
+      "loss": {
+        "feature_matching_weight": 30.0,
+        "perceptual_weight": 10.0
+      }
+    },
+    "small_dataset": {
+      "description": "Optimized for small datasets like CARS microscopy",
+      "model_size": "standard",
+      "batch_size": 8,
+      "max_epochs": 2000,
+      "loss": {
+        "gan_loss": "hinge",
+        "feature_matching_weight": 20.0
+      },
+      "optimizer": {
+        "generator": {
+          "lr": 0.0001
+        },
+        "discriminator": {
+          "lr": 0.0004
+        }
+      },
+      "model": {
+        "training": {
+          "ema_decay": 0.95,
+          "use_ema": true
+        }
+      },
+      "callbacks": {
+        "model_checkpoint": {
+          "monitor": "val/g_loss",
+          "mode": "min",
+          "filename": "fastgan-{epoch:04d}-{val_g_loss:.3f}",
+          "save_top_k": 20,
+          "every_n_epochs": 50
+        },
+        "early_stopping": {
+          "monitor": "val/g_loss",
+          "patience": 500,
+          "min_delta": 0.001
+        }
+      },
+      "check_val_every_n_epoch": 10,
+      "log_images_every_n_epochs": 10
+    },
+    "no_ema": {
+      "description": "Standard configuration without EMA",
+      "model_size": "standard",
+      "batch_size": 16,
+      "max_epochs": 1500,
+      "loss": {
+        "gan_loss": "hinge",
+        "feature_matching_weight": 20.0
+      },
+      "optimizer": {
+        "generator": {
+          "lr": 0.0001
+        },
+        "discriminator": {
+          "lr": 0.0004
+        }
+      },
+      "model": {
+        "training": {
+          "use_ema": false
+        }
+      }
+    },
+    "debug": {
+      "description": "Debug configuration with frequent logging",
+      "model_size": "micro",
+      "batch_size": 4,
+      "max_epochs": 100,
+      "check_val_every_n_epoch": 1,
+      "log_images_every_n_epochs": 1,
+      "training": {
+        "log_every_n_steps": 1
+      }
+    }
+  },
+  "model_configs": {
+    "micro": {
+      "generator": {
+        "ngf": 32,
+        "n_layers": 3
+      },
+      "discriminator": {
+        "ndf": 32,
+        "n_layers": 2
+      }
+    },
+    "small": {
+      "generator": {
+        "ngf": 48,
+        "n_layers": 3
+      },
+      "discriminator": {
+        "ndf": 48,
+        "n_layers": 3
+      }
+    },
+    "standard": {
+      "generator": {
+        "ngf": 64,
+        "n_layers": 4
+      },
+      "discriminator": {
+        "ndf": 64,
+        "n_layers": 3
+      }
+    },
+    "large": {
+      "generator": {
+        "ngf": 96,
+        "n_layers": 4
+      },
+      "discriminator": {
+        "ndf": 96,
+        "n_layers": 4
+      }
+    },
+    "xlarge": {
+      "generator": {
+        "ngf": 128,
+        "n_layers": 5
+      },
+      "discriminator": {
+        "ndf": 128,
+        "n_layers": 4
+      }
+    }
+  },
+  "default_batch_sizes": {
+    "micro": 32,
+    "small": 24,
+    "standard": 16,
+    "large": 12,
+    "xlarge": 8
+  }
+}
