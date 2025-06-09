@@ -24,6 +24,9 @@ Usage:
     
     # Enhance contrast with multiple methods
     python cars_data_pipeline.py --input_path data/processed --task enhance --enhancement_methods all
+    
+    # Fix existing processed data
+    python cars_data_pipeline.py --input_path data/processed --task fix
 """
 
 import argparse
@@ -178,9 +181,26 @@ class CARSDataPipeline:
                        train_ratio: float = 0.8,
                        val_ratio: float = 0.1,
                        test_ratio: float = 0.1,
-                       seed: int = 42) -> Dict:
-        """Prepare dataset with proper conversion and splitting"""
+                       seed: int = 42,
+                       percentile_low: float = 0.1,
+                       percentile_high: float = 99.9,
+                       use_log_transform: bool = False) -> Dict:
+        """Prepare dataset with proper conversion and splitting
+        
+        Args:
+            use_8bit: Convert to 8-bit format
+            train_ratio: Training set ratio
+            val_ratio: Validation set ratio
+            test_ratio: Test set ratio
+            seed: Random seed for splits
+            percentile_low: Lower percentile for normalization (default 0.1)
+            percentile_high: Upper percentile for normalization (default 99.9)
+            use_log_transform: Apply log transformation before normalization (good for sparse data)
+        """
         print("\n🔄 Preparing dataset...")
+        print(f"   Using percentiles: ({percentile_low}, {percentile_high})")
+        if use_log_transform:
+            print("   Applying log transformation for sparse data")
         
         image_paths = self.find_images()
         if not image_paths:
@@ -216,20 +236,74 @@ class CARSDataPipeline:
                     
                     # Convert bit depth if needed
                     if img.dtype == np.uint16 and use_8bit:
-                        # Use percentile-based conversion
-                        p_low, p_high = np.percentile(img, (0.1, 99.9))
-                        img = np.clip((img - p_low) / (p_high - p_low), 0, 1)
-                        img = (img * 255).astype(np.uint8)
+                        # Apply log transformation if requested (before percentile normalization)
+                        if use_log_transform:
+                            # Convert to float and apply log(1 + x) to handle zeros
+                            img_float = img.astype(np.float32)
+                            img = np.log1p(img_float)
+                            
+                            # Now apply percentile normalization on log-transformed data
+                            p_low, p_high = np.percentile(img, (percentile_low, percentile_high))
+                            
+                            if self.stats['processed_count'] == 0:
+                                print(f"  First image (log-transformed) percentiles: p{percentile_low}={p_low:.2f}, p{percentile_high}={p_high:.2f}")
+                        else:
+                            # Standard percentile normalization
+                            p_low, p_high = np.percentile(img, (percentile_low, percentile_high))
+                            
+                            if self.stats['processed_count'] == 0:
+                                print(f"  First image percentiles: p{percentile_low}={p_low:.0f}, p{percentile_high}={p_high:.0f}")
+                        
+                        # Normalize to [0, 1] range
+                        if p_high > p_low:
+                            img_normalized = np.clip((img - p_low) / (p_high - p_low), 0, 1)
+                        else:
+                            img_normalized = np.zeros_like(img, dtype=np.float32)
+                        
+                        # Convert to uint8 with proper scaling
+                        img = (img_normalized * 255).astype(np.uint8)
+                        
+                    elif img.dtype == np.uint16 and not use_8bit:
+                        # Keep as 16-bit but apply percentile normalization
+                        if use_log_transform:
+                            img_float = img.astype(np.float32)
+                            img = np.log1p(img_float)
+                        
+                        p_low, p_high = np.percentile(img, (percentile_low, percentile_high))
+                        if p_high > p_low:
+                            img = np.clip((img - p_low) / (p_high - p_low) * 65535, 0, 65535).astype(np.uint16)
+                        else:
+                            img = np.zeros_like(img, dtype=np.uint16)
+                    
+                    elif img.dtype == np.uint8 and use_log_transform:
+                        # Apply log transform to 8-bit images if requested
+                        img_float = img.astype(np.float32)
+                        img_log = np.log1p(img_float)
+                        
+                        # Normalize log values to 0-255 range
+                        p_low, p_high = np.percentile(img_log, (percentile_low, percentile_high))
+                        if p_high > p_low:
+                            img_normalized = np.clip((img_log - p_low) / (p_high - p_low), 0, 1)
+                            img = (img_normalized * 255).astype(np.uint8)
+                        
                     elif img.dtype != np.uint8 and use_8bit:
+                        # Handle other dtypes
                         img = img.astype(np.uint8)
                     
                     # Ensure grayscale
                     if len(img.shape) == 3:
                         img = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
                     
-                    # Save processed image
+                    # Save processed image - ensure proper format
                     output_path = self.dirs[split_name] / f"{img_path.stem}.png"
-                    Image.fromarray(img).save(output_path)
+                    
+                    # Verify image is in correct format before saving
+                    if use_8bit and img.dtype != np.uint8:
+                        print(f"  Warning: Converting {img.dtype} to uint8 before saving")
+                        img = img.astype(np.uint8)
+                    
+                    # Save with PIL to ensure proper PNG encoding
+                    Image.fromarray(img).save(output_path, 'PNG')
                     
                     all_stats.append({
                         'split': split_name,
@@ -257,6 +331,63 @@ class CARSDataPipeline:
         print(f"\n✅ Dataset prepared - Mean: {dataset_stats['global_mean']:.1f}, Std: {dataset_stats['global_std']:.1f}")
         
         return dataset_stats
+    
+    def fix_existing_uint16_images(self, percentile_low: float = 0.1, percentile_high: float = 99.9, use_log_transform: bool = False) -> bool:
+        """Fix any existing uint16 images in processed directories
+        
+        Args:
+            percentile_low: Lower percentile for normalization
+            percentile_high: Upper percentile for normalization
+            use_log_transform: Apply log transformation before normalization
+        """
+        print(f"\n🔧 Checking for uint16 images to fix (using percentiles: {percentile_low}, {percentile_high})...")
+        if use_log_transform:
+            print("   Will apply log transformation")
+        
+        fixed_count = 0
+        checked_count = 0
+        
+        for split in ['train', 'val', 'test']:
+            split_dir = self.dirs[split]
+            if not split_dir.exists():
+                continue
+                
+            image_files = list(split_dir.glob('*.png')) + list(split_dir.glob('*.tif'))
+            
+            for img_path in tqdm(image_files, desc=f"Checking {split}"):
+                checked_count += 1
+                img = np.array(Image.open(img_path))
+                
+                if img.dtype == np.uint16:
+                    # Apply log transformation if requested
+                    if use_log_transform:
+                        img_float = img.astype(np.float32)
+                        img = np.log1p(img_float)
+                    
+                    # Apply proper percentile normalization
+                    p_low, p_high = np.percentile(img, (percentile_low, percentile_high))
+                    
+                    if p_high > p_low:
+                        img_normalized = np.clip((img - p_low) / (p_high - p_low), 0, 1)
+                        img_uint8 = (img_normalized * 255).astype(np.uint8)
+                    else:
+                        img_uint8 = np.zeros_like(img, dtype=np.uint8)
+                    
+                    # Save fixed image
+                    Image.fromarray(img_uint8).save(img_path, 'PNG')
+                    fixed_count += 1
+                    
+                    if fixed_count == 1:
+                        print(f"  Fixed first image: {img_path.name}")
+                        print(f"    Original: dtype={img.dtype}, range=[{img.min()}, {img.max()}]")
+                        print(f"    Fixed: dtype={img_uint8.dtype}, range=[{img_uint8.min()}, {img_uint8.max()}]")
+        
+        if fixed_count > 0:
+            print(f"✅ Fixed {fixed_count} uint16 images out of {checked_count} total")
+            return True
+        else:
+            print(f"✅ All {checked_count} images are already in correct format")
+            return False
     
     # ==================== Enhancement Methods ====================
     
@@ -342,23 +473,34 @@ class CARSDataPipeline:
         return cv2.equalizeHist(img)
     
     def _apply_adaptive_gamma(self, img: np.ndarray, target_mean: float = 140.0) -> np.ndarray:
-        """Apply adaptive gamma correction to reach target mean"""
-        current_mean = img.mean()
+        """Apply adaptive gamma correction to reach target mean
         
-        # Iterative gamma adjustment
-        gamma = 1.0
-        best_gamma = 1.0
-        best_diff = abs(current_mean - target_mean)
+        Special handling for sparse microscopy data with bright spots
+        """
+        # For sparse microscopy data, use log transformation first
+        img_float = img.astype(np.float32)
         
-        for g in np.linspace(0.3, 3.0, 50):
-            test_img = self._apply_gamma_correction(img, g)
-            diff = abs(test_img.mean() - target_mean)
-            
-            if diff < best_diff:
-                best_diff = diff
-                best_gamma = g
+        # Add small epsilon to avoid log(0)
+        img_log = np.log1p(img_float)
         
-        return self._apply_gamma_correction(img, best_gamma)
+        # Normalize log-transformed image
+        img_log_norm = (img_log - img_log.min()) / (img_log.max() - img_log.min() + 1e-8)
+        
+        # Apply gamma correction on log-transformed data
+        current_mean = img_log_norm.mean() * 255
+        
+        if current_mean > 0:
+            # Estimate gamma to reach target
+            gamma = np.log(target_mean / 255.0) / np.log(current_mean / 255.0)
+            gamma = np.clip(gamma, 0.3, 3.0)
+        else:
+            gamma = 1.0
+        
+        # Apply gamma
+        img_gamma = np.power(img_log_norm, gamma)
+        
+        # Convert back to uint8
+        return (img_gamma * 255).astype(np.uint8)
     
     def _apply_unsharp_mask(self, img: np.ndarray, radius: float = 1.0, amount: float = 1.0) -> np.ndarray:
         """Apply unsharp masking for edge enhancement"""
@@ -401,133 +543,103 @@ class CARSDataPipeline:
         # 6. Normalization diagnostics
         analyses['normalization'] = self._diagnose_normalization()
         
-        self.stats['analysis_results'].update(analyses)
+        self.stats['analysis_results'] = analyses
         
-        # Generate comprehensive report
+        # Generate report
         self._generate_analysis_report(analyses)
         
         return analyses
     
     def _analyze_statistics(self) -> Dict:
-        """Analyze basic image statistics"""
+        """Analyze basic statistics across splits"""
         print("  - Computing basic statistics...")
         
-        stats_by_split = {}
+        split_stats = {}
         
         for split in ['train', 'val', 'test']:
             split_dir = self.dirs[split]
             if not split_dir.exists():
                 continue
             
-            images = list(split_dir.glob('*.png'))
-            if not images:
+            image_paths = list(split_dir.glob('*.png'))
+            if not image_paths:
                 continue
             
-            split_stats = []
+            # Sample statistics
+            means, stds, mins, maxs = [], [], [], []
             
-            for img_path in tqdm(images[:100], desc=f"Analyzing {split}", leave=False):
+            for img_path in image_paths[:50]:  # Sample first 50
                 img = np.array(Image.open(img_path))
-                
-                split_stats.append({
-                    'mean': img.mean(),
-                    'std': img.std(),
-                    'min': img.min(),
-                    'max': img.max(),
-                    'median': np.median(img),
-                    'q25': np.percentile(img, 25),
-                    'q75': np.percentile(img, 75)
-                })
+                means.append(img.mean())
+                stds.append(img.std())
+                mins.append(img.min())
+                maxs.append(img.max())
             
-            stats_df = pd.DataFrame(split_stats)
-            stats_by_split[split] = {
-                'count': len(images),
-                'mean': stats_df['mean'].mean(),
-                'std': stats_df['std'].mean(),
-                'range': [stats_df['min'].min(), stats_df['max'].max()]
+            split_stats[split] = {
+                'count': len(image_paths),
+                'mean_intensity': f"{np.mean(means):.2f} ± {np.std(means):.2f}",
+                'intensity_range': f"[{int(np.mean(mins))}, {int(np.mean(maxs))}]"
             }
         
-        return stats_by_split
+        return split_stats
     
     def _analyze_distributions(self) -> Dict:
         """Analyze pixel intensity distributions"""
-        print("  - Analyzing distributions...")
+        print("  - Analyzing intensity distributions...")
         
-        # Sample images from each split
+        # Sample images from train set
+        train_dir = self.dirs['train']
+        if not train_dir.exists():
+            return {}
+        
+        sample_images = list(train_dir.glob('*.png'))[:50]
         all_pixels = []
-        split_pixels = {}
         
-        for split in ['train', 'val', 'test']:
-            split_dir = self.dirs[split]
-            if not split_dir.exists():
-                continue
-            
-            images = list(split_dir.glob('*.png'))[:20]
-            split_data = []
-            
-            for img_path in images:
-                img = np.array(Image.open(img_path))
-                split_data.extend(img.flatten())
-            
-            if split_data:
-                split_pixels[split] = split_data
-                all_pixels.extend(split_data)
+        for img_path in sample_images:
+            img = np.array(Image.open(img_path))
+            all_pixels.extend(img.flatten())
         
-        # Compute distribution metrics
-        if all_pixels:
-            distribution_stats = {
-                'skewness': stats.skew(all_pixels),
-                'kurtosis': stats.kurtosis(all_pixels),
-                'normality_test': stats.normaltest(all_pixels[:10000])[1]  # p-value
-            }
-        else:
-            distribution_stats = {}
+        all_pixels = np.array(all_pixels)
         
-        # Create distribution plots
-        self._create_distribution_plots(split_pixels)
+        # Compute distribution statistics
+        distribution_stats = {
+            'skewness': stats.skew(all_pixels),
+            'kurtosis': stats.kurtosis(all_pixels),
+            'normality_test_pvalue': stats.normaltest(all_pixels)[1]
+        }
+        
+        # Create histogram
+        self._create_distribution_plot(all_pixels)
         
         return distribution_stats
     
     def _analyze_texture_properties(self) -> Dict:
-        """Analyze texture properties using various methods"""
+        """Analyze texture properties relevant for microscopy"""
         print("  - Analyzing texture properties...")
         
-        texture_metrics = []
-        sample_images = list(self.dirs['train'].glob('*.png'))[:50]
-        
-        for img_path in tqdm(sample_images, desc="Texture analysis", leave=False):
-            img = np.array(Image.open(img_path))
-            
-            # Compute various texture features
-            metrics = {
-                'contrast': measure.shannon_entropy(img),
-                'energy': np.sum(img ** 2) / img.size,
-                'homogeneity': 1 / (1 + np.var(img)),
-                'edge_density': np.sum(filters.sobel(img)) / img.size
-            }
-            
-            texture_metrics.append(metrics)
-        
-        # Aggregate metrics
-        texture_df = pd.DataFrame(texture_metrics)
+        # This is a placeholder - implement actual texture analysis
+        # Could include: Haralick features, LBP, etc.
         
         return {
-            'contrast_mean': texture_df['contrast'].mean(),
-            'energy_mean': texture_df['energy'].mean(),
-            'homogeneity_mean': texture_df['homogeneity'].mean(),
-            'edge_density_mean': texture_df['edge_density'].mean()
+            'texture_analysis': 'Not implemented in this version'
         }
     
     def _analyze_frequency_content(self) -> Dict:
         """Analyze frequency domain properties"""
         print("  - Analyzing frequency content...")
         
+        # Sample analysis on a few images
+        train_dir = self.dirs['train']
+        if not train_dir.exists():
+            return {}
+        
+        sample_images = list(train_dir.glob('*.png'))[:10]
         freq_metrics = []
-        sample_images = list(self.dirs['train'].glob('*.png'))[:30]
         
         for img_path in sample_images:
             img = np.array(Image.open(img_path))
             
-            # Compute FFT
+            # FFT
             f_transform = np.fft.fft2(img)
             f_shift = np.fft.fftshift(f_transform)
             magnitude_spectrum = np.abs(f_shift)
@@ -536,8 +648,8 @@ class CARSDataPipeline:
             h, w = img.shape
             center_h, center_w = h // 2, w // 2
             
-            # Define frequency bands
-            total_energy = np.sum(magnitude_spectrum)
+            # Compute energy in different frequency bands
+            total_energy = np.sum(magnitude_spectrum ** 2)
             
             # Low frequency (center region)
             low_freq_mask = np.zeros_like(magnitude_spectrum, dtype=bool)
@@ -623,7 +735,8 @@ class CARSDataPipeline:
         diagnosis = {
             'raw_stats': raw_stats,
             'processed_stats': processed_stats,
-            'normalization_ok': abs(processed_stats.get('mean', 0) - 127.5) < 50 if processed_stats else False
+            'normalization_ok': processed_stats.get('dtype') == 'uint8' and 
+                               50 < processed_stats.get('mean', 0) < 200 if processed_stats else False
         }
         
         return diagnosis
@@ -657,44 +770,72 @@ class CARSDataPipeline:
         
         # PSNR distribution
         axes[1, 0].hist(metrics['psnr_scores'], bins=20, alpha=0.7, color='green')
+        axes[1, 0].axvline(np.mean(metrics['psnr_scores']), color='red', linestyle='--',
+                           label=f'Mean: {np.mean(metrics["psnr_scores"]):.1f} dB')
         axes[1, 0].set_xlabel('PSNR (dB)')
         axes[1, 0].set_ylabel('Frequency')
-        axes[1, 0].set_title('Peak Signal-to-Noise Ratio')
+        axes[1, 0].set_title('PSNR Distribution')
+        axes[1, 0].legend()
         axes[1, 0].grid(True, alpha=0.3)
         
         # Dynamic range comparison
-        dr_data = pd.DataFrame({
-            '16-bit': metrics['dynamic_range_16bit'],
-            '8-bit': metrics['dynamic_range_8bit']
-        })
-        dr_data.plot(kind='box', ax=axes[1, 1])
-        axes[1, 1].set_ylabel('Dynamic Range')
-        axes[1, 1].set_title('Dynamic Range Comparison')
+        axes[1, 1].scatter(metrics['dynamic_range_16bit'], metrics['dynamic_range_8bit'], alpha=0.5)
+        axes[1, 1].plot([0, max(metrics['dynamic_range_16bit'])], 
+                        [0, max(metrics['dynamic_range_16bit']) * 255/65535], 
+                        'r--', label='Expected scaling')
+        axes[1, 1].set_xlabel('16-bit Dynamic Range')
+        axes[1, 1].set_ylabel('8-bit Dynamic Range')
+        axes[1, 1].set_title('Dynamic Range Preservation')
+        axes[1, 1].legend()
         axes[1, 1].grid(True, alpha=0.3)
         
         plt.tight_layout()
-        plt.savefig(self.dirs['visualizations'] / 'bit_depth_analysis.png', dpi=300, bbox_inches='tight')
+        plt.savefig(self.dirs['visualizations'] / 'bit_depth_analysis.png', dpi=150, bbox_inches='tight')
+        plt.close()
+    
+    def _create_distribution_plot(self, pixel_values: np.ndarray):
+        """Create pixel intensity distribution plot"""
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+        
+        # Histogram
+        ax1.hist(pixel_values, bins=50, density=True, alpha=0.7, color='blue', edgecolor='black')
+        ax1.set_xlabel('Pixel Intensity')
+        ax1.set_ylabel('Density')
+        ax1.set_title('Pixel Intensity Distribution')
+        ax1.grid(True, alpha=0.3)
+        
+        # Log-scale histogram (useful for sparse data)
+        ax2.hist(pixel_values, bins=50, density=True, alpha=0.7, color='green', edgecolor='black')
+        ax2.set_yscale('log')
+        ax2.set_xlabel('Pixel Intensity')
+        ax2.set_ylabel('Log Density')
+        ax2.set_title('Pixel Intensity Distribution (Log Scale)')
+        ax2.grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        plt.savefig(self.dirs['visualizations'] / 'intensity_distribution.png', dpi=150, bbox_inches='tight')
         plt.close()
     
     def _create_enhancement_comparison(self, methods: List[str]):
-        """Create enhancement method comparison visualization"""
-        # Get sample images
+        """Create visual comparison of enhancement methods"""
+        # Sample a few images
         sample_images = list(self.dirs['train'].glob('*.png'))[:3]
         
         if not sample_images:
             return
         
-        fig, axes = plt.subplots(len(sample_images), len(methods) + 1, 
-                                figsize=(4 * (len(methods) + 1), 4 * len(sample_images)))
+        n_methods = len(methods) + 1  # +1 for original
+        n_samples = len(sample_images)
         
-        if len(sample_images) == 1:
+        fig, axes = plt.subplots(n_samples, n_methods, figsize=(4 * n_methods, 4 * n_samples))
+        if n_samples == 1:
             axes = axes.reshape(1, -1)
         
         for i, img_path in enumerate(sample_images):
             # Original
-            img = np.array(Image.open(img_path))
-            axes[i, 0].imshow(img, cmap='gray')
-            axes[i, 0].set_title(f'Original\nMean: {img.mean():.1f}')
+            orig_img = np.array(Image.open(img_path))
+            axes[i, 0].imshow(orig_img, cmap='gray')
+            axes[i, 0].set_title('Original')
             axes[i, 0].axis('off')
             
             # Enhanced versions
@@ -702,99 +843,48 @@ class CARSDataPipeline:
                 enhanced_path = self.dirs['enhanced'] / method / 'train' / img_path.name
                 if enhanced_path.exists():
                     enh_img = np.array(Image.open(enhanced_path))
-                    axes[i, j + 1].imshow(enh_img, cmap='gray')
-                    axes[i, j + 1].set_title(f'{method}\nMean: {enh_img.mean():.1f}')
-                    axes[i, j + 1].axis('off')
-        
-        plt.suptitle('Enhancement Methods Comparison', fontsize=16)
-        plt.tight_layout()
-        plt.savefig(self.dirs['visualizations'] / 'enhancement_comparison.png', dpi=300, bbox_inches='tight')
-        plt.close()
-    
-    def _create_distribution_plots(self, split_pixels: Dict):
-        """Create pixel distribution plots"""
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        
-        colors = {'train': 'blue', 'val': 'orange', 'test': 'green'}
-        
-        # Combined histogram
-        for split, pixels in split_pixels.items():
-            if pixels:
-                axes[0].hist(pixels[::100], bins=50, alpha=0.6, label=split, 
-                           color=colors.get(split, 'gray'), density=True)
-        
-        axes[0].set_xlabel('Pixel Value')
-        axes[0].set_ylabel('Density')
-        axes[0].set_title('Pixel Intensity Distributions')
-        axes[0].legend()
-        axes[0].grid(True, alpha=0.3)
-        
-        # Box plot
-        if split_pixels:
-            box_data = [pixels[::1000] for pixels in split_pixels.values() if pixels]
-            box_labels = [split for split, pixels in split_pixels.items() if pixels]
-            axes[1].boxplot(box_data, labels=box_labels)
-            axes[1].set_ylabel('Pixel Value')
-            axes[1].set_title('Distribution Comparison')
-            axes[1].grid(True, alpha=0.3)
-        
-        # Cumulative distribution
-        for split, pixels in split_pixels.items():
-            if pixels:
-                sorted_pixels = np.sort(pixels[::100])
-                cdf = np.arange(1, len(sorted_pixels) + 1) / len(sorted_pixels)
-                axes[2].plot(sorted_pixels, cdf, label=split, color=colors.get(split, 'gray'))
-        
-        axes[2].set_xlabel('Pixel Value')
-        axes[2].set_ylabel('Cumulative Probability')
-        axes[2].set_title('Cumulative Distribution Functions')
-        axes[2].legend()
-        axes[2].grid(True, alpha=0.3)
+                    axes[i, j+1].imshow(enh_img, cmap='gray')
+                    axes[i, j+1].set_title(method.replace('_', ' ').title())
+                    axes[i, j+1].axis('off')
         
         plt.tight_layout()
-        plt.savefig(self.dirs['visualizations'] / 'pixel_distributions.png', dpi=300, bbox_inches='tight')
+        plt.savefig(self.dirs['visualizations'] / 'enhancement_comparison.png', dpi=150, bbox_inches='tight')
         plt.close()
     
-    def _evaluate_enhancement(self, method_dir: Path) -> Dict:
-        """Evaluate enhancement method effectiveness"""
-        original_stats = []
-        enhanced_stats = []
+    def _evaluate_enhancement(self, enhanced_dir: Path) -> Dict:
+        """Evaluate enhancement quality"""
+        # Simple evaluation based on contrast improvement
+        original_contrast = []
+        enhanced_contrast = []
         
-        # Compare original vs enhanced
-        for img_path in list(self.dirs['train'].glob('*.png'))[:50]:
-            enhanced_path = method_dir / 'train' / img_path.name
+        for img_path in list(self.dirs['train'].glob('*.png'))[:20]:
+            orig_img = np.array(Image.open(img_path))
+            enh_path = enhanced_dir / 'train' / img_path.name
             
-            if enhanced_path.exists():
-                orig = np.array(Image.open(img_path))
-                enh = np.array(Image.open(enhanced_path))
+            if enh_path.exists():
+                enh_img = np.array(Image.open(enh_path))
                 
-                original_stats.append({
-                    'mean': orig.mean(),
-                    'std': orig.std(),
-                    'contrast': orig.std() / (orig.mean() + 1e-8)
-                })
-                
-                enhanced_stats.append({
-                    'mean': enh.mean(),
-                    'std': enh.std(),
-                    'contrast': enh.std() / (enh.mean() + 1e-8)
-                })
+                # Measure contrast as std dev
+                original_contrast.append(orig_img.std())
+                enhanced_contrast.append(enh_img.std())
         
-        if not original_stats:
-            return {}
+        if original_contrast:
+            contrast_improvement = np.mean(enhanced_contrast) / np.mean(original_contrast)
+            mean_shift = np.mean(enhanced_contrast) - np.mean(original_contrast)
+            
+            return {
+                'contrast_improvement': contrast_improvement,
+                'mean_shift': mean_shift,
+                'std_change': np.mean(enhanced_contrast) - np.mean(original_contrast)
+            }
         
-        orig_df = pd.DataFrame(original_stats)
-        enh_df = pd.DataFrame(enhanced_stats)
-        
-        return {
-            'mean_shift': enh_df['mean'].mean() - orig_df['mean'].mean(),
-            'std_change': enh_df['std'].mean() - orig_df['std'].mean(),
-            'contrast_improvement': enh_df['contrast'].mean() / orig_df['contrast'].mean()
-        }
+        return {}
+    
+    # ==================== Report Generation ====================
     
     def _generate_analysis_report(self, analyses: Dict):
         """Generate comprehensive analysis report"""
-        report_path = self.dirs['reports'] / f'analysis_report_{datetime.now().strftime("%Y%m%d_%H%M%S")}.md'
+        report_path = self.dirs['reports'] / f"analysis_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
         
         with open(report_path, 'w') as f:
             f.write("# CARS Data Analysis Report\n\n")
@@ -804,10 +894,10 @@ class CARSDataPipeline:
             f.write("## Dataset Overview\n\n")
             if 'statistics' in analyses:
                 for split, stats in analyses['statistics'].items():
-                    f.write(f"### {split.capitalize()} Split\n")
-                    f.write(f"- Images: {stats['count']}\n")
-                    f.write(f"- Mean intensity: {stats['mean']:.2f} ± {stats['std']:.2f}\n")
-                    f.write(f"- Range: [{stats['range'][0]}, {stats['range'][1]}]\n\n")
+                    f.write(f"### {split.title()} Split\n")
+                    for key, value in stats.items():
+                        f.write(f"- {key.replace('_', ' ').title()}: {value}\n")
+                    f.write("\n")
             
             # Distribution analysis
             if 'distributions' in analyses:
@@ -815,57 +905,49 @@ class CARSDataPipeline:
                 dist = analyses['distributions']
                 f.write(f"- Skewness: {dist.get('skewness', 'N/A'):.3f}\n")
                 f.write(f"- Kurtosis: {dist.get('kurtosis', 'N/A'):.3f}\n")
-                f.write(f"- Normality test p-value: {dist.get('normality_test', 'N/A'):.4f}\n\n")
+                f.write(f"- Normality test p-value: {dist.get('normality_test_pvalue', 'N/A'):.4f}\n\n")
             
-            # Texture properties
-            if 'texture' in analyses:
-                f.write("## Texture Properties\n\n")
-                texture = analyses['texture']
-                for key, value in texture.items():
-                    f.write(f"- {key.replace('_', ' ').title()}: {value:.4f}\n")
-                f.write("\n")
-            
-            # Frequency content
-            if 'frequency' in analyses:
-                f.write("## Frequency Analysis\n\n")
-                freq = analyses['frequency']
-                f.write(f"- Low frequency dominance: {freq.get('low_freq_dominance', 0):.2%}\n")
-                f.write(f"- High frequency content: {freq.get('high_freq_content', 0):.2%}\n\n")
-            
-            # Quality metrics
+            # Image quality
             if 'quality' in analyses:
                 f.write("## Image Quality Metrics\n\n")
                 quality = analyses['quality']
-                f.write(f"- Mean sharpness: {quality.get('mean_sharpness', 0):.2f}\n")
-                f.write(f"- Mean noise level: {quality.get('mean_noise', 0):.2f}\n")
-                f.write(f"- Mean dynamic range: {quality.get('mean_dynamic_range', 0):.2%}\n\n")
+                f.write(f"- Mean sharpness: {quality.get('mean_sharpness', 'N/A'):.2f}\n")
+                f.write(f"- Mean noise level: {quality.get('mean_noise', 'N/A'):.2f}\n")
+                f.write(f"- Mean dynamic range: {quality.get('mean_dynamic_range', 'N/A'):.2%}\n\n")
             
             # Normalization diagnostics
             if 'normalization' in analyses:
+                normalization = analyses['normalization']
                 f.write("## Normalization Diagnostics\n\n")
-                norm = analyses['normalization']
-                f.write(f"- Raw data: {norm.get('raw_stats', {})}\n")
-                f.write(f"- Processed data: {norm.get('processed_stats', {})}\n")
-                f.write(f"- Normalization OK: {'✅' if norm.get('normalization_ok', False) else '❌'}\n\n")
+                f.write(f"- Raw data: {normalization['raw_stats']}\n")
+                f.write(f"- Processed data: {normalization['processed_stats']}\n")
+                f.write(f"- Normalization OK: {'✅' if normalization['normalization_ok'] else '❌'}\n\n")
+                
+                # Microscopy-specific warnings
+                if normalization['raw_stats'].get('dtype') == 'uint16':
+                    f.write("⚠️ **Warning**: Raw data is 16-bit. For non-linear optical microscopy:\n")
+                    f.write("  - Use percentile normalization (0.1, 99.9) to preserve sparse bright features\n")
+                    f.write("  - Consider log transformation for high dynamic range\n")
+                    f.write("  - Use 'minmax' normalization instead of 'standard' in dataset config\n\n")
             
             # Enhancement results
-            if self.stats.get('enhancement_results'):
+            if 'enhancement_results' in self.stats and self.stats['enhancement_results']:
                 f.write("## Enhancement Results\n\n")
                 for method, results in self.stats['enhancement_results'].items():
                     f.write(f"### {method.replace('_', ' ').title()}\n")
-                    f.write(f"- Mean shift: {results.get('mean_shift', 0):.2f}\n")
-                    f.write(f"- Std change: {results.get('std_change', 0):.2f}\n")
-                    f.write(f"- Contrast improvement: {results.get('contrast_improvement', 1):.2f}x\n\n")
+                    f.write(f"- Mean shift: {results.get('mean_shift', 'N/A'):.2f}\n")
+                    f.write(f"- Std change: {results.get('std_change', 'N/A'):.2f}\n")
+                    f.write(f"- Contrast improvement: {results.get('contrast_improvement', 'N/A'):.2f}x\n\n")
             
             # Recommendations
             f.write("## Recommendations\n\n")
             
             # Bit depth recommendation
-            if 'bit_depth' in self.stats.get('analysis_results', {}):
-                bd = self.stats['analysis_results']['bit_depth']
-                f.write(f"- **Bit depth**: {'Use 8-bit' if bd['recommendation'] == 'use_8bit' else 'Keep 16-bit'}\n")
-                f.write(f"  - SSIM: {bd['ssim_mean']:.3f}\n")
-                f.write(f"  - Information loss: {bd['info_loss_mean']:.1f}%\n\n")
+            if 'bit_depth' in self.stats['analysis_results']:
+                bit_depth = self.stats['analysis_results']['bit_depth']
+                f.write(f"- **Bit depth**: {'Keep 16-bit' if bit_depth['recommendation'] == 'keep_16bit' else 'Use 8-bit'}\n")
+                f.write(f"  - SSIM: {bit_depth['ssim_mean']:.3f}\n")
+                f.write(f"  - Information loss: {bit_depth['info_loss_mean']:.1f}%\n\n")
             
             # Enhancement recommendation
             if self.stats.get('enhancement_results'):
@@ -905,7 +987,7 @@ class CARSDataPipeline:
             'augment_train': True,
             'augment_val': False,
             'augment_test': False,
-            'normalize_method': 'standard',
+            'normalize_method': 'minmax',  # Changed from 'standard' for microscopy
             'normalize_to_unit_range': True,
             'mean': 0.5,
             'std': 0.5,
@@ -918,12 +1000,12 @@ class CARSDataPipeline:
                 'rotation_degrees': 15,
                 'scale_range': [0.9, 1.1],
                 'translate_percent': 0.1,
-                'brightness_factor': 0.1,
-                'contrast_factor': 0.1,
-                'gamma_range': [0.8, 1.2],
-                'gaussian_noise_std': 0.02,
-                'gaussian_blur_sigma': [0.1, 1.0],
-                'gaussian_blur_prob': 0.3,
+                'brightness_factor': 0.05,  # Reduced for microscopy
+                'contrast_factor': 0.05,    # Reduced for microscopy
+                'gamma_range': [0.9, 1.1],  # Narrower range for microscopy
+                'gaussian_noise_std': 0.01,  # Reduced for microscopy
+                'gaussian_blur_sigma': [0.1, 0.5],  # Reduced for microscopy
+                'gaussian_blur_prob': 0.2,  # Reduced probability
                 'elastic_transform': True,
                 'elastic_alpha': 100,
                 'elastic_sigma': 10,
@@ -964,9 +1046,24 @@ class CARSDataPipeline:
     def run_full_pipeline(self, 
                          use_8bit: bool = True,
                          enhancement_methods: Union[str, List[str]] = 'all',
-                         comprehensive_analysis: bool = True):
-        """Run the complete data pipeline"""
+                         comprehensive_analysis: bool = True,
+                         percentile_low: float = 0.1,
+                         percentile_high: float = 99.9,
+                         use_log_transform: bool = False):
+        """Run the complete data pipeline
+        
+        Args:
+            use_8bit: Convert to 8-bit format
+            enhancement_methods: Enhancement methods to apply
+            comprehensive_analysis: Run comprehensive analysis
+            percentile_low: Lower percentile for normalization
+            percentile_high: Upper percentile for normalization
+            use_log_transform: Apply log transformation before normalization
+        """
         print("🚀 Running full CARS data pipeline...\n")
+        
+        # Step 0: Check and fix any existing uint16 images
+        self.fix_existing_uint16_images(percentile_low, percentile_high, use_log_transform)
         
         # Step 1: Bit depth analysis
         bit_depth_analysis = self.analyze_bit_depth_impact()
@@ -976,9 +1073,17 @@ class CARSDataPipeline:
             use_8bit = bit_depth_analysis['recommendation'] == 'use_8bit'
         
         # Step 2: Prepare dataset
-        dataset_stats = self.prepare_dataset(use_8bit=use_8bit)
+        dataset_stats = self.prepare_dataset(
+            use_8bit=use_8bit,
+            percentile_low=percentile_low,
+            percentile_high=percentile_high,
+            use_log_transform=use_log_transform
+        )
         
-        # Step 3: Enhance dataset
+        # Step 3: Enhance dataset (using microscopy-appropriate methods)
+        if enhancement_methods == 'all':
+            # For microscopy, prioritize CLAHE and adaptive gamma
+            enhancement_methods = ['clahe', 'adaptive_gamma', 'histogram_equalization']
         enhancement_results = self.enhance_dataset(methods=enhancement_methods)
         
         # Step 4: Comprehensive analysis
@@ -986,6 +1091,15 @@ class CARSDataPipeline:
         
         # Step 5: Create configuration
         config_path = self.create_config_file()
+        
+        # Step 6: Verify normalization
+        diagnosis = self._diagnose_normalization()
+        if diagnosis['normalization_ok']:
+            print("✅ Normalization verification passed")
+        else:
+            print("⚠️  Normalization issues detected:")
+            print(f"   Raw: {diagnosis['raw_stats']}")
+            print(f"   Processed: {diagnosis['processed_stats']}")
         
         # Final summary
         print("\n" + "=" * 60)
@@ -1018,7 +1132,7 @@ def main():
     
     # Task selection
     parser.add_argument('--task', type=str, 
-                       choices=['prepare', 'enhance', 'analyze', 'full'],
+                       choices=['prepare', 'enhance', 'analyze', 'full', 'fix'],
                        default='full',
                        help='Task to perform (default: full)')
     parser.add_argument('--full_pipeline', action='store_true',
@@ -1035,6 +1149,14 @@ def main():
                        help='Test set ratio')
     parser.add_argument('--seed', type=int, default=42,
                        help='Random seed for splits')
+    
+    # Percentile normalization options
+    parser.add_argument('--percentile_low', type=float, default=0.1,
+                       help='Lower percentile for normalization (default: 0.1, try 1.0 or 5.0 for sparse data)')
+    parser.add_argument('--percentile_high', type=float, default=99.9,
+                       help='Upper percentile for normalization (default: 99.9, try 99.0 or 95.0 for sparse data)')
+    parser.add_argument('--use_log_transform', action='store_true',
+                       help='Apply log transformation before normalization (recommended for sparse microscopy data)')
     
     # Enhancement options
     parser.add_argument('--enhancement_methods', nargs='+', 
@@ -1066,7 +1188,10 @@ def main():
             pipeline.run_full_pipeline(
                 use_8bit=args.use_8bit,
                 enhancement_methods=args.enhancement_methods,
-                comprehensive_analysis=args.comprehensive_analysis
+                comprehensive_analysis=args.comprehensive_analysis,
+                percentile_low=args.percentile_low,
+                percentile_high=args.percentile_high,
+                use_log_transform=args.use_log_transform
             )
             
         elif args.task == 'prepare':
@@ -1081,7 +1206,10 @@ def main():
                 train_ratio=args.train_ratio,
                 val_ratio=args.val_ratio,
                 test_ratio=args.test_ratio,
-                seed=args.seed
+                seed=args.seed,
+                percentile_low=args.percentile_low,
+                percentile_high=args.percentile_high,
+                use_log_transform=args.use_log_transform
             )
             pipeline.create_config_file()
             
@@ -1100,6 +1228,30 @@ def main():
                 return
             
             pipeline.analyze_dataset(comprehensive=args.comprehensive_analysis)
+            
+        elif args.task == 'fix':
+            # Fix existing processed data
+            if not any(pipeline.dirs[split].exists() for split in ['train', 'val', 'test']):
+                print("❌ No processed data found to fix.")
+                return
+            
+            print("🔧 Fixing existing processed data...")
+            fixed = pipeline.fix_existing_uint16_images(
+                percentile_low=args.percentile_low,
+                percentile_high=args.percentile_high,
+                use_log_transform=args.use_log_transform
+            )
+            
+            if fixed:
+                # Run analysis on fixed data
+                pipeline.analyze_dataset(comprehensive=False)
+                
+                # Update config
+                pipeline.create_config_file()
+                
+                print("\n✅ Data fixed! Please retrain your model with the corrected data.")
+            else:
+                print("\n✅ No fixes needed - data is already in correct format.")
             
     except Exception as e:
         print(f"\n❌ Pipeline failed: {e}")
