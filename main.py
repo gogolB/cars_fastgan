@@ -349,7 +349,7 @@ def main(cfg: DictConfig) -> None:
         print("Training completed successfully!")
         
         # Run evaluation if requested
-        if cfg.evaluation.full_evaluation_at_end:
+        if cfg.get('evaluation', {}).get('full_evaluation_at_end', False):
             results = run_evaluation(model, datamodule, cfg)
             
             # Print key results

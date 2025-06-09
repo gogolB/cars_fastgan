@@ -266,9 +266,11 @@ class ModelEvaluator:
         for key, value in results.items():
             if isinstance(value, (torch.Tensor, np.ndarray)):
                 serializable_results[key] = float(value)
+            elif isinstance(value, (np.float32, np.float64)):
+                serializable_results[key] = float(value)
             elif isinstance(value, dict):
                 serializable_results[key] = {
-                    k: float(v) if isinstance(v, (torch.Tensor, np.ndarray)) else v 
+                    k: float(v) if isinstance(v, (torch.Tensor, np.ndarray, np.float32, np.float64)) else v 
                     for k, v in value.items()
                 }
             else:
