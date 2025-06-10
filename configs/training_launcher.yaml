@@ -1,0 +1,43 @@
+# configs/training_launcher.yaml
+# Configuration file for the training manager launcher
+# This provides all the base configuration values that the training manager needs
+
+defaults:
+  - config  # Import the main config.yaml
+
+# This file exists to help the training manager load all configurations
+# without running Hydra's main decorator. The training manager can load
+# this file to get all the default values from the config hierarchy.
+
+# Override any specific values needed for the launcher
+_target_: null  # This is not an instantiable config
+
+# Ensure all paths are strings (not interpolations) for easier handling
+paths:
+  data_path: "data/raw"
+  output_dir: "outputs"
+  checkpoint_dir: "experiments/checkpoints"
+  log_dir: "experiments/logs"
+
+# Flatten some commonly needed values for easier access
+training_defaults:
+  max_epochs: ${max_epochs}
+  check_val_every_n_epoch: ${check_val_every_n_epoch}
+  log_images_every_n_epochs: ${log_images_every_n_epochs}
+  gradient_clip_val: ${gradient_clip_val}
+  batch_size: ${data.batch_size}
+  num_workers: ${data.num_workers}
+
+# Model defaults
+model_defaults:
+  generator_ngf: ${model.generator.ngf}
+  generator_layers: ${model.generator.n_layers}
+  discriminator_ndf: ${model.discriminator.ndf}
+  discriminator_layers: ${model.discriminator.n_layers}
+
+# Callback defaults
+callback_defaults:
+  checkpoint_monitor: ${callbacks.model_checkpoint.monitor}
+  checkpoint_mode: ${callbacks.model_checkpoint.mode}
+  checkpoint_save_top_k: ${callbacks.model_checkpoint.save_top_k}
+  early_stopping_patience: ${callbacks.early_stopping.patience}
