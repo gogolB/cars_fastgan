@@ -118,8 +118,8 @@
         "model_checkpoint": {
           "monitor": "val/g_loss",
           "mode": "min",
-          "filename": "fastgan-{epoch:04d}-{val_g_loss:.3f}",
-          "save_top_k": 20,
+          "filename": "fastgan-ep{epoch:04d}",
+          "save_top_k": 10,
           "every_n_epochs": 50
         },
         "early_stopping": {
@@ -128,8 +128,8 @@
           "min_delta": 0.001
         }
       },
-      "check_val_every_n_epoch": 10,
-      "log_images_every_n_epochs": 10
+      "check_val_every_n_epoch": 1,
+      "log_images_every_n_epochs": 1
     },
     "no_ema": {
       "description": "Standard configuration without EMA",
