@@ -317,7 +317,13 @@ class FastGANModule(pl.LightningModule):
     
     def training_step(self, batch: Tuple[torch.Tensor], batch_idx: int):
         """Training step with fixed logging and advanced losses"""
-        real_images = batch[0] if isinstance(batch, (list, tuple)) else batch
+        if isinstance(batch, dict):
+            real_images = batch['image']
+        elif isinstance(batch, (list, tuple)):
+            real_images = batch[0]
+        else:
+            real_images = batch
+        
         batch_size = real_images.size(0)
         
         # Get optimizers
@@ -580,7 +586,12 @@ class FastGANModule(pl.LightningModule):
     
     def validation_step(self, batch: Tuple[torch.Tensor], batch_idx: int):
         """Validation step with fixed metrics"""
-        real_images = batch[0] if isinstance(batch, (list, tuple)) else batch
+        if isinstance(batch, dict):
+            real_images = batch['image']
+        elif isinstance(batch, (list, tuple)):
+            real_images = batch[0]
+        else:
+            real_images = batch
         batch_size = real_images.size(0)
         
         # Generate fake images
