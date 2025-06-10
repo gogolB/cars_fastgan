@@ -9,48 +9,9 @@
         "gan_loss": "hinge",
         "feature_matching_weight": 10.0
       },
-    "visual_inspection": {
-      "description": "Frequent image logging for visual quality assessment",
-      "model_size": "standard",
-      "batch_size": 8,
-      "max_epochs": 2000,
-      "loss": {
-        "gan_loss": "hinge",
-        "feature_matching_weight": 20.0
-      },
       "optimizer": {
-        "generator": {
-          "lr": 0.0001
-        },
-        "discriminator": {
-          "lr": 0.0004
-        }
-      },
-      "model": {
-        "training": {
-          "ema_decay": 0.95,
-          "use_ema": true
-        }
-      },
-      "callbacks": {
-        "model_checkpoint": {
-          "monitor": "val/g_loss",
-          "mode": "min",
-          "filename": "fastgan-{epoch:04d}",
-          "save_top_k": -1,
-          "every_n_epochs": 100
-        }
-      },
-      "check_val_every_n_epoch": 5,
-      "log_images_every_n_epochs": 5
-    },
-      "optimizer": {
-        "generator": {
-          "lr": 0.0002
-        },
-        "discriminator": {
-          "lr": 0.0002
-        }
+        "generator": {"lr": 0.0002},
+        "discriminator": {"lr": 0.0002}
       }
     },
     "improved": {
@@ -63,32 +24,143 @@
         "feature_matching_weight": 20.0
       },
       "optimizer": {
-        "generator": {
-          "lr": 0.0001
-        },
-        "discriminator": {
-          "lr": 0.0004
-        }
-      }
-    },
-    "fast": {
-      "description": "Fast training for quick experiments",
-      "model_size": "micro",
-      "batch_size": 32,
-      "max_epochs": 500,
+        "generator": {"lr": 0.0001},
+        "discriminator": {"lr": 0.0004}
+      },
       "training": {
-        "log_images_every_n_epochs": 10,
-        "val_check_interval": 50
+        "use_gradient_penalty": true,
+        "gradient_penalty_weight": 10.0,
+        "use_ema": true,
+        "ema_decay": 0.999
       }
     },
-    "high_quality": {
-      "description": "High quality with large model",
-      "model_size": "large",
+    "enhanced_losses": {
+      "description": "Enhanced with perceptual, SSIM, and TV losses for better quality",
+      "model_size": "standard",
       "batch_size": 8,
       "max_epochs": 2000,
+      "config_name": "fastgan_enhanced",
       "loss": {
-        "feature_matching_weight": 30.0,
-        "perceptual_weight": 10.0
+        "gan_loss": "hinge",
+        "feature_matching_weight": 10.0,
+        "use_perceptual_loss": true,
+        "perceptual_weight": 5.0,
+        "perceptual_layers": ["relu2_2", "relu3_3"],
+        "use_ssim_loss": true,
+        "ssim_weight": 2.0,
+        "use_tv_loss": true,
+        "tv_weight": 0.0001
+      },
+      "optimizer": {
+        "generator": {"lr": 0.0001},
+        "discriminator": {"lr": 0.0004}
+      },
+      "training": {
+        "use_gradient_penalty": true,
+        "gradient_penalty_weight": 10.0,
+        "use_ema": true,
+        "ema_decay": 0.999
+      },
+      "check_val_every_n_epoch": 10,
+      "log_images_every_n_epochs": 10
+    },
+    "enhanced_full": {
+      "description": "Full suite of advanced losses for maximum quality",
+      "model_size": "standard",
+      "batch_size": 8,
+      "max_epochs": 3000,
+      "config_name": "fastgan_enhanced",
+      "loss": {
+        "gan_loss": "hinge",
+        "feature_matching_weight": 15.0,
+        "use_perceptual_loss": true,
+        "perceptual_weight": 10.0,
+        "perceptual_layers": ["relu2_2", "relu3_3", "relu4_3"],
+        "use_ssim_loss": true,
+        "ssim_weight": 5.0,
+        "use_tv_loss": true,
+        "tv_weight": 0.0001,
+        "use_focal_freq_loss": true,
+        "focal_freq_weight": 1.0,
+        "use_mode_seeking": true,
+        "mode_seeking_weight": 0.1,
+        "mode_seeking_freq": 5
+      },
+      "optimizer": {
+        "generator": {"lr": 0.00005},
+        "discriminator": {"lr": 0.0002}
+      },
+      "training": {
+        "use_gradient_penalty": true,
+        "gradient_penalty_weight": 10.0,
+        "use_ema": true,
+        "ema_decay": 0.999
+      },
+      "check_val_every_n_epoch": 5,
+      "log_images_every_n_epochs": 5
+    },
+    "enhanced_fast": {
+      "description": "Quick experiments with basic advanced losses",
+      "model_size": "micro",
+      "batch_size": 16,
+      "max_epochs": 500,
+      "config_name": "fastgan_enhanced",
+      "loss": {
+        "gan_loss": "hinge",
+        "feature_matching_weight": 10.0,
+        "use_ssim_loss": true,
+        "ssim_weight": 1.0,
+        "use_tv_loss": true,
+        "tv_weight": 0.0001
+      },
+      "optimizer": {
+        "generator": {"lr": 0.0002},
+        "discriminator": {"lr": 0.0002}
+      },
+      "check_val_every_n_epoch": 25,
+      "log_images_every_n_epochs": 25
+    },
+    "ablation_perceptual": {
+      "description": "Ablation study - perceptual loss only",
+      "model_size": "standard",
+      "batch_size": 8,
+      "max_epochs": 1000,
+      "config_name": "fastgan_enhanced",
+      "loss": {
+        "gan_loss": "hinge",
+        "feature_matching_weight": 10.0,
+        "use_perceptual_loss": true,
+        "perceptual_weight": 10.0,
+        "perceptual_layers": ["relu2_2", "relu3_3"],
+        "use_ssim_loss": false,
+        "use_tv_loss": false,
+        "use_focal_freq_loss": false,
+        "use_mode_seeking": false
+      },
+      "optimizer": {
+        "generator": {"lr": 0.0001},
+        "discriminator": {"lr": 0.0004}
+      }
+    },
+    "ablation_ssim": {
+      "description": "Ablation study - SSIM loss only",
+      "model_size": "standard",
+      "batch_size": 8,
+      "max_epochs": 1000,
+      "config_name": "fastgan_enhanced",
+      "loss": {
+        "gan_loss": "hinge",
+        "feature_matching_weight": 10.0,
+        "use_perceptual_loss": false,
+        "use_ssim_loss": true,
+        "ssim_weight": 5.0,
+        "use_tv_loss": false,
+        "use_focal_freq_loss": false,
+        "use_mode_seeking": false
+      },
+      "optimizer": {
+        "generator": {"lr": 0.0001},
+        "discriminator": {"lr": 0.0004}
       }
     },
     "small_dataset": {
@@ -101,17 +173,13 @@
         "feature_matching_weight": 20.0
       },
       "optimizer": {
-        "generator": {
-          "lr": 0.0001
-        },
-        "discriminator": {
-          "lr": 0.0004
-        }
+        "generator": {"lr": 0.0001},
+        "discriminator": {"lr": 0.0004}
       },
       "model": {
         "training": {
-          "ema_decay": 0.95,
-          "use_ema": true
+          "use_ema": true,
+          "ema_decay": 0.95
         }
       },
       "callbacks": {
@@ -131,98 +199,66 @@
       "check_val_every_n_epoch": 10,
       "log_images_every_n_epochs": 10
     },
+    "fast": {
+      "description": "Fast training for quick experiments",
+      "model_size": "micro",
+      "batch_size": 32,
+      "max_epochs": 500,
+      "training": {
+        "log_images_every_n_epochs": 10,
+        "val_check_interval": 50
+      }
+    },
+    "high_quality": {
+      "description": "High quality with large model",
+      "model_size": "large",
+      "batch_size": 8,
+      "max_epochs": 2000,
+      "loss": {
+        "feature_matching_weight": 30.0
+      }
+    },
     "no_ema": {
       "description": "Standard configuration without EMA",
       "model_size": "standard",
-      "batch_size": 16,
-      "max_epochs": 1500,
-      "loss": {
-        "gan_loss": "hinge",
-        "feature_matching_weight": 20.0
-      },
-      "optimizer": {
-        "generator": {
-          "lr": 0.0001
-        },
-        "discriminator": {
-          "lr": 0.0004
-        }
-      },
+      "batch_size": 8,
+      "max_epochs": 1000,
       "model": {
         "training": {
           "use_ema": false
         }
       }
     },
-    "debug": {
-      "description": "Debug configuration with frequent logging",
-      "model_size": "micro",
-      "batch_size": 4,
-      "max_epochs": 100,
-      "check_val_every_n_epoch": 1,
-      "log_images_every_n_epochs": 1,
-      "training": {
-        "log_every_n_steps": 1
-      }
+    "visual_inspection": {
+      "description": "Frequent image logging for visual quality assessment",
+      "model_size": "standard",
+      "batch_size": 8,
+      "max_epochs": 2000,
+      "loss": {
+        "gan_loss": "hinge",
+        "feature_matching_weight": 20.0
+      },
+      "optimizer": {
+        "generator": {"lr": 0.0001},
+        "discriminator": {"lr": 0.0004}
+      },
+      "model": {
+        "training": {
+          "ema_decay": 0.95,
+          "use_ema": true
+        }
+      },
+      "callbacks": {
+        "model_checkpoint": {
+          "monitor": "val/g_loss",
+          "mode": "min",
+          "filename": "fastgan-{epoch:04d}",
+          "save_top_k": -1,
+          "every_n_epochs": 100
+        }
+      },
+      "check_val_every_n_epoch": 5,
+      "log_images_every_n_epochs": 5
     }
-  },
-  "model_configs": {
-    "micro": {
-      "generator": {
-        "ngf": 32,
-        "n_layers": 3
-      },
-      "discriminator": {
-        "ndf": 32,
-        "n_layers": 2
-      }
-    },
-    "small": {
-      "generator": {
-        "ngf": 48,
-        "n_layers": 3
-      },
-      "discriminator": {
-        "ndf": 48,
-        "n_layers": 3
-      }
-    },
-    "standard": {
-      "generator": {
-        "ngf": 64,
-        "n_layers": 4
-      },
-      "discriminator": {
-        "ndf": 64,
-        "n_layers": 3
-      }
-    },
-    "large": {
-      "generator": {
-        "ngf": 96,
-        "n_layers": 4
-      },
-      "discriminator": {
-        "ndf": 96,
-        "n_layers": 4
-      }
-    },
-    "xlarge": {
-      "generator": {
-        "ngf": 128,
-        "n_layers": 5
-      },
-      "discriminator": {
-        "ndf": 128,
-        "n_layers": 4
-      }
-    }
-  },
-  "default_batch_sizes": {
-    "micro": 32,
-    "small": 24,
-    "standard": 16,
-    "large": 12,
-    "xlarge": 8
   }
 }

@@ -1,0 +1,136 @@
+# FASTGAN Model Configuration with Advanced Losses
+
+model_name: "fastgan_enhanced"
+
+# Generator architecture
+generator:
+  latent_dim: 256
+  ngf: 64
+  n_layers: 4
+  image_size: 512
+  channels: 1
+  use_skip_connections: true
+  skip_connection_scale: 0.1
+  norm_type: "batch"
+  activation: "relu"
+  output_activation: "tanh"
+  init_type: "normal"
+  init_gain: 0.02
+
+# Discriminator architecture  
+discriminator:
+  ndf: 64
+  n_layers: 3
+  image_size: 512
+  channels: 1
+  use_spectral_norm: true
+  norm_type: "batch"
+  use_multiscale: true
+  num_scales: 2
+  activation: "leaky_relu"
+  leaky_relu_slope: 0.2
+  init_type: "normal"
+  init_gain: 0.02
+  use_patch_gan: false
+  patch_size: 70
+
+# Loss configuration with advanced losses
+loss:
+  # Base GAN loss
+  gan_loss: "hinge"
+  adversarial_weight: 1.0
+  
+  # Original feature matching
+  feature_matching_weight: 10.0
+  use_feature_matching: true
+  feature_layers: [2, 3, 4]
+  
+  # Gradient penalty (original)
+  use_gradient_penalty: true
+  gradient_penalty_weight: 10.0
+  
+  # === ADVANCED LOSSES ===
+  
+  # Perceptual loss - maintains texture quality
+  use_perceptual_loss: true
+  perceptual_weight: 5.0
+  perceptual_layers: ['relu2_2', 'relu3_3']  # Good for microscopy
+  
+  # LPIPS loss - alternative to perceptual (don't use both)
+  use_lpips_loss: false
+  lpips_weight: 10.0
+  
+  # SSIM loss - preserves follicle structure
+  use_ssim_loss: true
+  ssim_weight: 2.0
+  
+  # Total Variation - reduces background noise
+  use_tv_loss: true
+  tv_weight: 0.0001
+  
+  # Focal frequency loss - balances details
+  use_focal_freq_loss: true
+  focal_freq_weight: 0.5
+  focal_freq_alpha: 1.0
+  
+  # Mode seeking - prevents mode collapse
+  use_mode_seeking: true
+  mode_seeking_weight: 0.05
+  mode_seeking_freq: 10
+
+# Optimization
+optimizer:
+  generator:
+    type: "adam"
+    lr: 0.0001  # Lower LR for stability with multiple losses
+    betas: [0.0, 0.999]
+    weight_decay: 0.0
+  discriminator:
+    type: "adam"
+    lr: 0.0004
+    betas: [0.0, 0.999]
+    weight_decay: 0.0
+
+# Learning rate scheduling
+scheduler:
+  use_scheduler: false
+  type: "linear"
+  start_epoch: 100
+  end_epoch: 200
+
+# Training specific
+training:
+  n_critic: 1
+  use_gradient_penalty: true
+  gradient_penalty_weight: 10.0
+  progressive_growing: false
+  use_ema: true
+  ema_decay: 0.999
+
+# Architecture variants (inherited from base)
+variants:
+  micro:
+    generator:
+      ngf: 32
+      n_layers: 3
+    discriminator:
+      ndf: 32
+      n_layers: 2
+      
+  standard:
+    generator:
+      ngf: 64
+      n_layers: 4
+    discriminator:
+      ndf: 64
+      n_layers: 3
+      
+  large:
+    generator:
+      ngf: 128
+      n_layers: 5
+    discriminator:
+      ndf: 128
+      n_layers: 4
+
+active_variant: "standard"

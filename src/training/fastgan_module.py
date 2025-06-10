@@ -8,6 +8,7 @@ Key improvements:
 - Better loss tracking
 - Gradient norm monitoring
 - Proper image logging
+- Advanced loss support
 """
 
 import torch
@@ -25,6 +26,14 @@ import logging
 
 from ..models.fastgan import FastGAN, FastGANGenerator
 from ..evaluation.metrics import FIDScore, LPIPSScore
+
+# Try to import advanced losses
+try:
+    from ..losses.advanced_losses import AdvancedLossManager
+    ADVANCED_LOSSES_AVAILABLE = True
+except ImportError:
+    ADVANCED_LOSSES_AVAILABLE = False
+    logging.info("Advanced losses not available")
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +63,23 @@ class FastGANModule(pl.LightningModule):
         feature_matching_weight: float = 10.0,
         use_feature_matching: bool = True,
         feature_layers: List[int] = [2, 3, 4],
+        
+        # Advanced loss parameters
+        use_perceptual_loss: bool = False,
+        perceptual_weight: float = 10.0,
+        perceptual_layers: List[str] = None,
+        use_lpips_loss: bool = False,
+        lpips_weight: float = 10.0,
+        use_ssim_loss: bool = False,
+        ssim_weight: float = 1.0,
+        use_tv_loss: bool = False,
+        tv_weight: float = 1e-4,
+        use_focal_freq_loss: bool = False,
+        focal_freq_weight: float = 1.0,
+        focal_freq_alpha: float = 1.0,
+        use_mode_seeking: bool = False,
+        mode_seeking_weight: float = 0.1,
+        mode_seeking_freq: int = 5,
         
         # Optimization parameters
         generator_lr: float = 0.0002,
@@ -126,6 +152,39 @@ class FastGANModule(pl.LightningModule):
             torch.randn(fixed_noise_size, latent_dim)
         )
         
+        # Initialize advanced losses if available and enabled
+        if ADVANCED_LOSSES_AVAILABLE:
+            advanced_loss_config = {
+                'use_perceptual_loss': use_perceptual_loss,
+                'perceptual_weight': perceptual_weight,
+                'perceptual_layers': perceptual_layers,
+                'use_lpips_loss': use_lpips_loss,
+                'lpips_weight': lpips_weight,
+                'use_ssim_loss': use_ssim_loss,
+                'ssim_weight': ssim_weight,
+                'use_tv_loss': use_tv_loss,
+                'tv_weight': tv_weight,
+                'use_focal_freq_loss': use_focal_freq_loss,
+                'focal_freq_weight': focal_freq_weight,
+                'focal_freq_alpha': focal_freq_alpha,
+                'use_mode_seeking': use_mode_seeking,
+                'mode_seeking_weight': mode_seeking_weight,
+                'mode_seeking_freq': mode_seeking_freq,
+                'device': getattr(self, 'device', 'cuda')
+            }
+            
+            # Check if any advanced losses are enabled
+            if any(k.startswith('use_') and v for k, v in advanced_loss_config.items()):
+                self.advanced_loss_manager = AdvancedLossManager(
+                    advanced_loss_config,
+                    device=getattr(self, 'device', 'cuda')
+                )
+                logger.info("Advanced loss manager initialized")
+            else:
+                self.advanced_loss_manager = None
+        else:
+            self.advanced_loss_manager = None
+        
         # Evaluation metrics
         self.compute_fid = compute_fid
         self.compute_lpips = compute_lpips
@@ -150,6 +209,10 @@ class FastGANModule(pl.LightningModule):
         # Track training progress
         self.global_train_step = 0
         self.last_logged_epoch = 0
+        self.last_computed_metrics_epoch = 0
+        
+        # Validation outputs storage
+        self.validation_step_outputs = []
         
     def _create_ema_model(self) -> FastGANGenerator:
         """Create EMA version of generator"""
@@ -179,6 +242,11 @@ class FastGANModule(pl.LightningModule):
             for ema_param, param in zip(self.ema_generator.parameters(), 
                                        self.model.generator.parameters()):
                 ema_param.data.mul_(self.ema_decay).add_(param.data, alpha=1 - self.ema_decay)
+    
+    def on_train_start(self):
+        """Move advanced losses to correct device if needed"""
+        if self.advanced_loss_manager is not None:
+            self.advanced_loss_manager.to(self.device)
     
     def adversarial_loss(self, pred: torch.Tensor, target_is_real: bool) -> torch.Tensor:
         """Compute adversarial loss based on loss type"""
@@ -233,180 +301,222 @@ class FastGANModule(pl.LightningModule):
         
         gradients = gradients.view(batch_size, -1)
         gradient_norm = gradients.norm(2, dim=1)
-        penalty = ((gradient_norm - 1) ** 2).mean()
+        gradient_penalty = ((gradient_norm - 1) ** 2).mean()
         
-        return penalty
+        return gradient_penalty
     
-    def training_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
-        """Training step with proper logging"""
-        real_images = batch['image']
+    def _get_gradient_norm(self, model: nn.Module) -> float:
+        """Get gradient norm for monitoring"""
+        total_norm = 0.0
+        for p in model.parameters():
+            if p.grad is not None:
+                param_norm = p.grad.data.norm(2)
+                total_norm += param_norm.item() ** 2
+        total_norm = total_norm ** 0.5
+        return total_norm
+    
+    def training_step(self, batch: Tuple[torch.Tensor], batch_idx: int):
+        """Training step with fixed logging and advanced losses"""
+        real_images = batch[0] if isinstance(batch, (list, tuple)) else batch
         batch_size = real_images.size(0)
         
         # Get optimizers
-        opt_g, opt_d = self.optimizers()
-        
-        # Update global step counter
-        self.global_train_step += 1
-        
-        # Sample noise
-        noise = torch.randn(batch_size, self.hparams.latent_dim, device=self.device)
-        
-        # Generate fake images
-        fake_images = self.model.generator(noise)
+        opt_d, opt_g = self.optimizers()
         
         # ============================================
-        # Train Discriminator
+        # DISCRIMINATOR UPDATE
         # ============================================
-        opt_d.zero_grad()
         
-        # Real images
-        if self.model.discriminator.use_multiscale:
-            real_pred, real_scale_preds, real_features = self.model.discriminator(
-                real_images, return_features=True
-            )
-        else:
-            real_output = self.model.discriminator(real_images, return_features=True)
-            if isinstance(real_output, tuple) and len(real_output) == 2:
-                real_pred, real_features = real_output
-                real_scale_preds = []
-            else:
-                real_pred = real_output
-                real_features = []
-                real_scale_preds = []
-        
-        # Fake images (detached)
-        if self.model.discriminator.use_multiscale:
-            fake_pred, fake_scale_preds, fake_features = self.model.discriminator(
-                fake_images.detach(), return_features=True
-            )
-        else:
-            fake_output = self.model.discriminator(fake_images.detach(), return_features=True)
-            if isinstance(fake_output, tuple) and len(fake_output) == 2:
-                fake_pred, fake_features = fake_output
-                fake_scale_preds = []
-            else:
-                fake_pred = fake_output
-                fake_features = []
-                fake_scale_preds = []
-        
-        # Discriminator loss
-        d_loss_real = self.adversarial_loss(real_pred, True)
-        d_loss_fake = self.adversarial_loss(fake_pred, False)
-        d_loss = d_loss_real + d_loss_fake
-        
-        # Multi-scale discriminator loss
-        for real_scale, fake_scale in zip(real_scale_preds, fake_scale_preds):
-            d_loss += self.adversarial_loss(real_scale, True)
-            d_loss += self.adversarial_loss(fake_scale, False)
-        
-        # Gradient penalty
-        if self.use_gradient_penalty:
-            gp = self.gradient_penalty(real_images, fake_images)
-            d_loss += self.gradient_penalty_weight * gp
-            self.log("train/gradient_penalty", gp, 
-                    on_step=True, on_epoch=False, prog_bar=False, 
-                    logger=True, sync_dist=True)
-        
-        self.manual_backward(d_loss)
-        
-        # Gradient clipping for discriminator
-        if self.trainer.gradient_clip_val > 0:
-            torch.nn.utils.clip_grad_norm_(
-                self.model.discriminator.parameters(), 
-                self.trainer.gradient_clip_val
-            )
-        
-        # Log discriminator gradient norm
-        d_grad_norm = self._get_gradient_norm(self.model.discriminator)
-        self.log("train/d_grad_norm", d_grad_norm,
-                on_step=True, on_epoch=False, prog_bar=False,
-                logger=True, sync_dist=True)
-        
-        opt_d.step()
-        
-        # ============================================
-        # Train Generator
-        # ============================================
-        if batch_idx % self.n_critic == 0:
-            opt_g.zero_grad()
+        for _ in range(self.n_critic):
+            opt_d.zero_grad()
             
-            # Generate new fake images
-            if self.model.discriminator.use_multiscale:
-                fake_pred_g, fake_scale_preds_g, fake_features_g = self.model.discriminator(
-                    fake_images, return_features=True
-                )
-            else:
-                fake_output_g = self.model.discriminator(fake_images, return_features=True)
-                if isinstance(fake_output_g, tuple) and len(fake_output_g) == 2:
-                    fake_pred_g, fake_features_g = fake_output_g
-                    fake_scale_preds_g = []
-                else:
-                    fake_pred_g = fake_output_g
-                    fake_features_g = []
-                    fake_scale_preds_g = []
+            # Generate fake images
+            z = torch.randn(batch_size, self.hparams.latent_dim, device=self.device)
+            fake_images = self.model.generator(z)
             
-            # Generator adversarial loss
-            if self.gan_loss == "hinge" or self.gan_loss == "wgan":
-                g_loss_adv = -fake_pred_g.mean()
-            else:
-                g_loss_adv = self.adversarial_loss(fake_pred_g, True)
-            
-            # Multi-scale generator loss
-            for fake_scale in fake_scale_preds_g:
-                if self.gan_loss == "hinge" or self.gan_loss == "wgan":
-                    g_loss_adv += -fake_scale.mean()
-                else:
-                    g_loss_adv += self.adversarial_loss(fake_scale, True)
-            
-            g_loss = self.adversarial_weight * g_loss_adv
-            
-            # Feature matching loss
-            if self.use_feature_matching and real_features and fake_features_g:
-                # Select only the specified layers for feature matching
-                if self.feature_layers:
-                    real_features_selected = [real_features[i] for i in self.feature_layers 
-                                            if i < len(real_features)]
-                    fake_features_selected = [fake_features_g[i] for i in self.feature_layers 
-                                            if i < len(fake_features_g)]
-                else:
-                    real_features_selected = real_features
-                    fake_features_selected = fake_features_g
+            # Discriminator predictions
+            if self.hparams.use_multiscale:
+                real_output = self.model.discriminator(real_images, return_features=True)
+                fake_output = self.model.discriminator(fake_images.detach(), return_features=True)
                 
-                if real_features_selected and fake_features_selected:
-                    fm_loss = self.feature_matching_loss(fake_features_selected, real_features_selected)
-                    g_loss += self.feature_matching_weight * fm_loss
-                    self.log("train/feature_matching_loss", fm_loss,
-                            on_step=True, on_epoch=False, prog_bar=False,
-                            logger=True, sync_dist=True)
+                if len(real_output) == 3:
+                    real_pred, real_scale_preds, real_features = real_output
+                    fake_pred, fake_scale_preds, fake_features = fake_output
+                elif len(real_output) == 2:
+                    real_pred, real_features = real_output
+                    fake_pred, fake_features = fake_output
+                    real_scale_preds = []
+                    fake_scale_preds = []
+                else:
+                    real_pred = real_output
+                    fake_pred = fake_output
+                    real_features = []
+                    fake_features = []
+                    real_scale_preds = []
+                    fake_scale_preds = []
+            else:
+                real_output = self.model.discriminator(real_images, return_features=False)
+                fake_output = self.model.discriminator(fake_images.detach(), return_features=False)
+                
+                if isinstance(real_output, tuple) and len(real_output) == 2:
+                    real_pred, real_features = real_output
+                    fake_pred, fake_features = fake_output
+                else:
+                    real_pred = real_output
+                    fake_pred = fake_output
+                    real_features = []
+                    fake_features = []
+                real_scale_preds = []
+                fake_scale_preds = []
             
-            self.manual_backward(g_loss)
+            # Discriminator loss
+            d_loss_real = self.adversarial_loss(real_pred, True)
+            d_loss_fake = self.adversarial_loss(fake_pred, False)
             
-            # Gradient clipping for generator
+            # Multi-scale losses
+            for real_scale, fake_scale in zip(real_scale_preds, fake_scale_preds):
+                d_loss_real += self.adversarial_loss(real_scale, True)
+                d_loss_fake += self.adversarial_loss(fake_scale, False)
+            
+            d_loss = d_loss_real + d_loss_fake
+            
+            # Gradient penalty
+            if self.use_gradient_penalty:
+                gp = self.gradient_penalty(real_images, fake_images)
+                d_loss += self.gradient_penalty_weight * gp
+                self.log("train/gradient_penalty", gp,
+                        on_step=True, on_epoch=False, prog_bar=False,
+                        logger=True, sync_dist=True)
+            
+            self.manual_backward(d_loss)
+            
+            # Gradient clipping for discriminator
             if self.trainer.gradient_clip_val > 0:
                 torch.nn.utils.clip_grad_norm_(
-                    self.model.generator.parameters(), 
+                    self.model.discriminator.parameters(), 
                     self.trainer.gradient_clip_val
                 )
             
-            # Log generator gradient norm
-            g_grad_norm = self._get_gradient_norm(self.model.generator)
-            self.log("train/g_grad_norm", g_grad_norm,
+            # Log discriminator gradient norm
+            d_grad_norm = self._get_gradient_norm(self.model.discriminator)
+            self.log("train/d_grad_norm", d_grad_norm,
                     on_step=True, on_epoch=False, prog_bar=False,
                     logger=True, sync_dist=True)
             
-            opt_g.step()
+            opt_d.step()
+        
+        # ============================================
+        # GENERATOR UPDATE
+        # ============================================
+        
+        opt_g.zero_grad()
+        
+        # Generate fake images
+        z = torch.randn(batch_size, self.hparams.latent_dim, device=self.device)
+        fake_images = self.model.generator(z)
+        
+        # Prepare for mode seeking loss if enabled
+        z2 = None
+        fake_images2 = None
+        if hasattr(self, 'advanced_loss_manager') and self.advanced_loss_manager is not None:
+            if self.advanced_loss_manager.config.get('use_mode_seeking', False):
+                z2 = torch.randn(batch_size, self.hparams.latent_dim, device=self.device)
+                fake_images2 = self.model.generator(z2)
+        
+        # Discriminator predictions for generator
+        if self.hparams.use_multiscale:
+            fake_output_g = self.model.discriminator(fake_images, return_features=True)
             
-            # Update EMA
-            if self.use_ema and self.ema_generator is not None:
-                self._update_ema()
+            if len(fake_output_g) == 3:
+                fake_pred_g, fake_scale_preds_g, fake_features_g = fake_output_g
+            elif len(fake_output_g) == 2:
+                fake_pred_g, fake_features_g = fake_output_g
+                fake_scale_preds_g = []
+            else:
+                fake_pred_g = fake_output_g
+                fake_features_g = []
+                fake_scale_preds_g = []
+        else:
+            fake_output_g = self.model.discriminator(fake_images, return_features=False)
+            if isinstance(fake_output_g, tuple) and len(fake_output_g) == 2:
+                fake_pred_g, fake_features_g = fake_output_g
+            else:
+                fake_pred_g = fake_output_g
+                fake_features_g = []
+            fake_scale_preds_g = []
+        
+        # Generator adversarial loss
+        if self.gan_loss == "hinge" or self.gan_loss == "wgan":
+            g_loss_adv = -fake_pred_g.mean()
+        else:
+            g_loss_adv = self.adversarial_loss(fake_pred_g, True)
+        
+        # Multi-scale generator loss
+        for fake_scale in fake_scale_preds_g:
+            if self.gan_loss == "hinge" or self.gan_loss == "wgan":
+                g_loss_adv += -fake_scale.mean()
+            else:
+                g_loss_adv += self.adversarial_loss(fake_scale, True)
+        
+        g_loss = self.adversarial_weight * g_loss_adv
+        
+        # Feature matching loss
+        if self.use_feature_matching and real_features and fake_features_g:
+            # Select only the specified layers for feature matching
+            if self.feature_layers:
+                real_features_selected = [real_features[i] for i in self.feature_layers 
+                                        if i < len(real_features)]
+                fake_features_selected = [fake_features_g[i] for i in self.feature_layers 
+                                        if i < len(fake_features_g)]
+            else:
+                real_features_selected = real_features
+                fake_features_selected = fake_features_g
             
-            # Log generator losses
-            self.log("train/g_loss", g_loss,
-                    on_step=True, on_epoch=True, prog_bar=True,
-                    logger=True, sync_dist=True)
-            self.log("train/g_loss_adv", g_loss_adv,
-                    on_step=True, on_epoch=False, prog_bar=False,
-                    logger=True, sync_dist=True)
+            if real_features_selected and fake_features_selected:
+                fm_loss = self.feature_matching_loss(fake_features_selected, real_features_selected)
+                g_loss += self.feature_matching_weight * fm_loss
+                self.log("train/feature_matching_loss", fm_loss,
+                        on_step=True, on_epoch=False, prog_bar=False,
+                        logger=True, sync_dist=True)
+        
+        # ============================================
+        # ADVANCED LOSSES
+        # ============================================
+        
+        if hasattr(self, 'advanced_loss_manager') and self.advanced_loss_manager is not None:
+            advanced_losses = self.advanced_loss_manager.compute_generator_losses(
+                fake_images, real_images,
+                z1=z, z2=z2, fake2=fake_images2,
+                global_step=self.global_train_step
+            )
+            
+            # Add advanced losses to generator loss
+            for loss_name, loss_value in advanced_losses.items():
+                g_loss += loss_value
+                self.log(f"train/g_loss_{loss_name}", loss_value,
+                        on_step=True, on_epoch=False, prog_bar=False,
+                        logger=True, sync_dist=True)
+        
+        self.manual_backward(g_loss)
+        
+        # Gradient clipping for generator
+        if self.trainer.gradient_clip_val > 0:
+            torch.nn.utils.clip_grad_norm_(
+                self.model.generator.parameters(), 
+                self.trainer.gradient_clip_val
+            )
+        
+        # Log generator gradient norm
+        g_grad_norm = self._get_gradient_norm(self.model.generator)
+        self.log("train/g_grad_norm", g_grad_norm,
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        
+        opt_g.step()
+        
+        # Update EMA
+        if self.use_ema and self.ema_generator is not None:
+            self._update_ema()
         
         # ============================================
         # Logging
@@ -420,6 +530,14 @@ class FastGANModule(pl.LightningModule):
                 on_step=True, on_epoch=False, prog_bar=False,
                 logger=True, sync_dist=True)
         self.log("train/d_loss_fake", d_loss_fake,
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        
+        # Log generator losses
+        self.log("train/g_loss", g_loss,
+                on_step=True, on_epoch=True, prog_bar=True,
+                logger=True, sync_dist=True)
+        self.log("train/g_loss_adv", g_loss_adv,
                 on_step=True, on_epoch=False, prog_bar=False,
                 logger=True, sync_dist=True)
         
@@ -446,171 +564,192 @@ class FastGANModule(pl.LightningModule):
         self.log("train/fake_img_mean", fake_images.mean(),
                 on_step=True, on_epoch=False, prog_bar=False,
                 logger=True, sync_dist=True)
+        self.log("train/real_img_std", real_images.std(),
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
+        self.log("train/fake_img_std", fake_images.std(),
+                on_step=True, on_epoch=False, prog_bar=False,
+                logger=True, sync_dist=True)
         
-    def _get_gradient_norm(self, model: nn.Module) -> float:
-        """Calculate gradient norm for a model"""
-        total_norm = 0.0
-        for p in model.parameters():
-            if p.grad is not None:
-                param_norm = p.grad.data.norm(2)
-                total_norm += param_norm.item() ** 2
-        total_norm = total_norm ** 0.5
-        return total_norm
+        # Update global step counter
+        self.global_train_step += 1
     
-    def validation_step(self, batch: Dict[str, torch.Tensor], batch_idx: int):
-        """Validation step"""
-        real_images = batch['image']
+    def on_validation_epoch_start(self):
+        """Clear validation outputs at the start of validation epoch"""
+        self.validation_step_outputs.clear()
+    
+    def validation_step(self, batch: Tuple[torch.Tensor], batch_idx: int):
+        """Validation step with fixed metrics"""
+        real_images = batch[0] if isinstance(batch, (list, tuple)) else batch
         batch_size = real_images.size(0)
         
         # Generate fake images
-        noise = torch.randn(batch_size, self.hparams.latent_dim, device=self.device)
+        z = torch.randn(batch_size, self.hparams.latent_dim, device=self.device)
+        
         with torch.no_grad():
-            if self.use_ema and self.ema_generator is not None:
-                fake_images = self.ema_generator(noise)
+            fake_images = self.model.generator(z)
+            
+            # Get discriminator predictions
+            if self.hparams.use_multiscale:
+                real_output = self.model.discriminator(real_images, return_features=False)
+                fake_output = self.model.discriminator(fake_images, return_features=False)
+                
+                # Handle multi-scale outputs
+                if isinstance(real_output, tuple):
+                    real_pred = real_output[0]
+                    fake_pred = fake_output[0]
+                else:
+                    real_pred = real_output
+                    fake_pred = fake_output
             else:
-                fake_images = self.model.generator(noise)
+                real_pred = self.model.discriminator(real_images)
+                fake_pred = self.model.discriminator(fake_images)
+            
+            # Compute validation losses
+            d_loss_real = self.adversarial_loss(real_pred, True)
+            d_loss_fake = self.adversarial_loss(fake_pred, False)
+            d_loss = d_loss_real + d_loss_fake
+            
+            # Generator loss
+            if self.gan_loss == "hinge" or self.gan_loss == "wgan":
+                g_loss = -fake_pred.mean()
+            else:
+                g_loss = self.adversarial_loss(fake_pred, True)
         
-        # Compute discriminator predictions
-        real_pred = self.model.discriminator(real_images)
-        fake_pred = self.model.discriminator(fake_images)
-        
-        if isinstance(real_pred, tuple):
-            real_pred = real_pred[0]
-        if isinstance(fake_pred, tuple):
-            fake_pred = fake_pred[0]
-        
-        # Validation losses
-        val_d_loss_real = self.adversarial_loss(real_pred, True)
-        val_d_loss_fake = self.adversarial_loss(fake_pred, False)
-        val_d_loss = val_d_loss_real + val_d_loss_fake
-        
-        if self.gan_loss == "hinge" or self.gan_loss == "wgan":
-            val_g_loss = -fake_pred.mean()
-        else:
-            val_g_loss = self.adversarial_loss(fake_pred, True)
-        
-        # Log validation losses
-        self.log("val/d_loss", val_d_loss,
-                on_step=False, on_epoch=True, prog_bar=True,
+        # Log validation metrics
+        self.log("val/d_loss", d_loss, 
+                on_step=False, on_epoch=True, prog_bar=False, 
                 logger=True, sync_dist=True)
-        self.log("val/g_loss", val_g_loss,
+        self.log("val/g_loss", g_loss, 
+                on_step=False, on_epoch=True, prog_bar=False, 
+                logger=True, sync_dist=True)
+        self.log("val/d_loss_real", d_loss_real,
                 on_step=False, on_epoch=True, prog_bar=False,
                 logger=True, sync_dist=True)
-        self.log("val/d_loss_real", val_d_loss_real,
-                on_step=False, on_epoch=True, prog_bar=False,
-                logger=True, sync_dist=True)
-        self.log("val/d_loss_fake", val_d_loss_fake,
+        self.log("val/d_loss_fake", d_loss_fake,
                 on_step=False, on_epoch=True, prog_bar=False,
                 logger=True, sync_dist=True)
         
-        return {
-            "val_d_loss": val_d_loss,
-            "val_g_loss": val_g_loss,
-            "real_images": real_images,
-            "fake_images": fake_images
-        }
+        # Store for epoch-level evaluation
+        self.validation_step_outputs.append({
+            'real_images': real_images.cpu(),
+            'fake_images': fake_images.cpu()
+        })
     
     def on_validation_epoch_end(self):
-        """Log images at end of validation epoch"""
+        """Compute epoch-level validation metrics and log images"""
+        # Log sample images
         if self.current_epoch - self.last_logged_epoch >= self.hparams.log_images_every_n_epochs:
             self._log_sample_images()
             self.last_logged_epoch = self.current_epoch
-    
-    
+        
+        # Compute metrics if enabled and enough epochs have passed
+        if self.current_epoch > 0 and self.current_epoch - self.last_computed_metrics_epoch >= 50:
+            self.last_computed_metrics_epoch = self.current_epoch
 
+            # Collect real and fake images for metrics
+            try:
+                real_images = torch.cat([out['real_images'] for out in self.validation_step_outputs[:10]], dim=0)
+                fake_images = torch.cat([out['fake_images'] for out in self.validation_step_outputs[:10]], dim=0)
+                
+                # Move to device
+                real_images = real_images.to(self.device)
+                fake_images = fake_images.to(self.device)
+                
+                # Compute FID
+                if self.compute_fid:
+                    try:
+                        fid_score = self.fid_metric.calculate_fid(
+                            real_images, 
+                            fake_images,
+                            batch_size=min(50, len(real_images))
+                        )
+                        
+                        self.log("val/fid_score", fid_score,
+                                on_step=False, on_epoch=True, prog_bar=True,
+                                logger=True, sync_dist=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to compute FID: {e}")
+                
+                # Compute LPIPS
+                if self.compute_lpips:
+                    try:
+                        lpips_score = self.lpips_metric.calculate_lpips(
+                            real_images,
+                            fake_images,
+                            batch_size=min(32, len(real_images))
+                        )
+                        
+                        self.log("val/lpips_score", lpips_score,
+                                on_step=False, on_epoch=True, prog_bar=True,
+                                logger=True, sync_dist=True)
+                    except Exception as e:
+                        logger.warning(f"Failed to compute LPIPS: {e}")
+                        
+            except Exception as e:
+                logger.warning(f"Failed to collect images for metrics: {e}")
+        
+        # Clear validation outputs
+        self.validation_step_outputs.clear()
+    
     def _log_sample_images(self):
-        """Log sample images to tensorboard with diagnostics"""
+        """Generate and log sample images with fixed noise"""
+        self.model.generator.eval()
+        
         with torch.no_grad():
-            # Generate samples with fixed noise
-            num_samples = min(16, len(self.fixed_noise))
+            # Use fixed noise for consistent samples
+            noise = self.fixed_noise[:self.hparams.num_sample_images].to(self.device)
             
-            # Generate from BOTH generators
-            if self.use_ema and self.ema_generator is not None:
-                fake_images_ema = self.ema_generator(self.fixed_noise[:num_samples])
-                print(f"\n[DIAGNOSTIC] Epoch {self.current_epoch}")
-                print(f"EMA Generator raw output - min: {fake_images_ema.min():.3f}, max: {fake_images_ema.max():.3f}, mean: {fake_images_ema.mean():.3f}")
+            # Generate from regular model
+            fake_images = self.model.generator(noise)
+            
+            # Generate from EMA model if available
+            if self.ema_generator is not None:
+                ema_fake_images = self.ema_generator(noise)
             else:
-                fake_images_ema = None
-                
-            # Always generate from regular generator too
-            fake_images_regular = self.model.generator(self.fixed_noise[:num_samples])
-            print(f"Regular Generator raw output - min: {fake_images_regular.min():.3f}, max: {fake_images_regular.max():.3f}, mean: {fake_images_regular.mean():.3f}")
+                ema_fake_images = fake_images
             
-            # Use EMA if available, otherwise regular
-            fake_images = fake_images_ema if fake_images_ema is not None else fake_images_regular
+            # Denormalize images (from [-1, 1] to [0, 1])
+            fake_images = (fake_images + 1) / 2
+            ema_fake_images = (ema_fake_images + 1) / 2
             
-            # Denormalize to [0, 1] for visualization
-            fake_images_display = (fake_images + 1) / 2
-            fake_images_display = torch.clamp(fake_images_display, 0, 1)
-            
-            print(f"After denormalization - min: {fake_images_display.min():.3f}, max: {fake_images_display.max():.3f}, mean: {fake_images_display.mean():.3f}")
-            
-            # Also generate with NEW random noise to see if it's the fixed noise causing issues
-            new_noise = torch.randn_like(self.fixed_noise[:4])
-            if self.use_ema and self.ema_generator is not None:
-                fake_new = self.ema_generator(new_noise)
-            else:
-                fake_new = self.model.generator(new_noise)
-            fake_new_display = torch.clamp((fake_new + 1) / 2, 0, 1)
-            print(f"New random noise - min: {fake_new_display.min():.3f}, max: {fake_new_display.max():.3f}, mean: {fake_new_display.mean():.3f}")
-            
-            # Create comparison grid
-            if fake_images_ema is not None:
-                # Show both EMA and regular
-                ema_display = torch.clamp((fake_images_ema + 1) / 2, 0, 1)
-                regular_display = torch.clamp((fake_images_regular + 1) / 2, 0, 1)
-                
-                # Stack for comparison: top row = EMA, bottom row = regular
-                comparison = torch.cat([
-                    ema_display[:4],
-                    regular_display[:4],
-                    fake_new_display
-                ], dim=0)
-                
-                comparison_grid = torchvision.utils.make_grid(comparison, nrow=4)
-                
-                if self.logger and hasattr(self.logger, 'experiment'):
-                    self.logger.experiment.add_image(
-                        "comparison/ema_vs_regular_vs_new", 
-                        comparison_grid, 
-                        self.global_step
-                    )
-            
-            # Create main grid
-            grid = torchvision.utils.make_grid(
-                fake_images_display, 
+            # Create grid
+            n_images = min(16, self.hparams.num_sample_images)
+            fake_grid = torchvision.utils.make_grid(
+                fake_images[:n_images], 
                 nrow=4, 
                 normalize=False,
-                value_range=(0, 1)
+                padding=2
+            )
+            
+            ema_fake_grid = torchvision.utils.make_grid(
+                ema_fake_images[:n_images], 
+                nrow=4, 
+                normalize=False,
+                padding=2
             )
             
             # Log to tensorboard
-            if self.logger and hasattr(self.logger, 'experiment'):
+            if hasattr(self.logger, 'experiment'):
                 self.logger.experiment.add_image(
-                    "generated_images", 
-                    grid, 
-                    self.global_step
+                    'generated_images', 
+                    fake_grid, 
+                    global_step=self.global_train_step
                 )
                 
-                # Also log individual samples for better inspection
-                for i in range(min(4, num_samples)):
+                if self.ema_generator is not None:
                     self.logger.experiment.add_image(
-                        f"generated_samples/sample_{i}", 
-                        fake_images_display[i], 
-                        self.global_step
+                        'ema_generated_images', 
+                        ema_fake_grid, 
+                        global_step=self.global_train_step
                     )
-    
-    def on_train_epoch_end(self):
-        """Called at the end of training epoch"""
-        # Log epoch number
-        self.log("epoch", float(self.current_epoch),
-                on_step=False, on_epoch=True, prog_bar=False,
-                logger=True, sync_dist=True)
+        
+        self.model.generator.train()
     
     def configure_optimizers(self):
-        """Configure optimizers and schedulers"""
+        """Configure optimizers with fixed parameters"""
         # Generator optimizer
-        g_optimizer = Adam(
+        opt_g = Adam(
             self.model.generator.parameters(),
             lr=self.hparams.generator_lr,
             betas=(self.hparams.beta1, self.hparams.beta2),
@@ -618,62 +757,27 @@ class FastGANModule(pl.LightningModule):
         )
         
         # Discriminator optimizer
-        d_optimizer = Adam(
+        opt_d = Adam(
             self.model.discriminator.parameters(),
             lr=self.hparams.discriminator_lr,
             betas=(self.hparams.beta1, self.hparams.beta2),
             weight_decay=self.hparams.weight_decay
         )
         
-        optimizers = [g_optimizer, d_optimizer]
-        
-        # Optional: Add schedulers
-        schedulers = []
-        
-        # Example: Linear warmup and decay
-        if hasattr(self.hparams, 'use_scheduler') and self.hparams.use_scheduler:
-            g_scheduler = {
-                'scheduler': LinearLR(
-                    g_optimizer,
-                    start_factor=0.1,
-                    total_iters=self.hparams.warmup_epochs
-                ),
-                'interval': 'epoch',
-                'frequency': 1
-            }
-            d_scheduler = {
-                'scheduler': LinearLR(
-                    d_optimizer,
-                    start_factor=0.1,
-                    total_iters=self.hparams.warmup_epochs
-                ),
-                'interval': 'epoch',
-                'frequency': 1
-            }
-            schedulers = [g_scheduler, d_scheduler]
-        
-        if schedulers:
-            return optimizers, schedulers
-        else:
-            return optimizers
+        return [opt_d, opt_g]
     
     def on_save_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Save additional state"""
-        # Save EMA state
-        if self.use_ema and self.ema_generator is not None:
-            checkpoint['ema_generator_state_dict'] = self.ema_generator.state_dict()
-        
-        # Save global step
+        """Save additional state to checkpoint"""
         checkpoint['global_train_step'] = self.global_train_step
+        
+        # Save EMA state if available
+        if self.ema_generator is not None:
+            checkpoint['ema_generator_state_dict'] = self.ema_generator.state_dict()
     
     def on_load_checkpoint(self, checkpoint: Dict[str, Any]) -> None:
-        """Load additional state"""
-        # Load EMA state
-        if self.use_ema and 'ema_generator_state_dict' in checkpoint:
-            if self.ema_generator is None:
-                self.ema_generator = self._create_ema_model()
-            self.ema_generator.load_state_dict(checkpoint['ema_generator_state_dict'])
+        """Load additional state from checkpoint"""
+        self.global_train_step = checkpoint.get('global_train_step', 0)
         
-        # Load global step
-        if 'global_train_step' in checkpoint:
-            self.global_train_step = checkpoint['global_train_step']
+        # Load EMA state if available
+        if self.ema_generator is not None and 'ema_generator_state_dict' in checkpoint:
+            self.ema_generator.load_state_dict(checkpoint['ema_generator_state_dict'])
