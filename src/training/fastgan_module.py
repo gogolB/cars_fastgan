@@ -149,6 +149,7 @@ class FastGANModule(pl.LightningModule):
         
         # Track training progress
         self.global_train_step = 0
+        self.last_logged_epoch = 0
         
     def _create_ema_model(self) -> FastGANGenerator:
         """Create EMA version of generator"""
@@ -511,8 +512,9 @@ class FastGANModule(pl.LightningModule):
     
     def on_validation_epoch_end(self):
         """Log images at end of validation epoch"""
-        if self.current_epoch % self.hparams.log_images_every_n_epochs == 0:
+        if self.current_epoch - self.last_logged_epoch >= self.hparams.log_images_every_n_epochs:
             self._log_sample_images()
+            self.last_logged_epoch = self.current_epoch
     
     
 

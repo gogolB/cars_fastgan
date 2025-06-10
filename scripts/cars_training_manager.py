@@ -409,7 +409,8 @@ class CARSTrainingManager:
         check_val_every_n_epoch: Optional[int] = None,
         log_images_every_n_epochs: Optional[int] = None,
         # Track which arguments were explicitly provided
-        _provided_args: Optional[set] = None
+        _provided_args: Optional[set] = None,
+        _additional_overrides: Optional[Dict[str, Any]] = None
     ) -> bool:
         """Launch training with complete configuration tracking"""
         
@@ -471,6 +472,13 @@ class CARSTrainingManager:
         override_kwargs['experiment_name'] = experiment_name or self._generate_experiment_name(preset or model_size)
         
         self._apply_command_line_overrides(**override_kwargs)
+        
+        # Apply additional dotted overrides with highest priority
+        if _additional_overrides:
+            console.print("\n[bright_red]⚡ Applying additional command-line overrides...[/bright_red]")
+            for key, value in _additional_overrides.items():
+                self.config_tracker.set_value(key, value, 'command_line')
+                console.print(f"  [bright_red]{key} = {value}[/bright_red]")
         
         # Apply additional config if provided
         if additional_config:
@@ -970,23 +978,46 @@ Examples:
     parser.add_argument('--show_checkpoints', action='store_true',
                        help='Show available checkpoints and exit')
     
-    # Parse once to get namespace and track which args were explicitly provided
-    args = parser.parse_args()
+    # Parse known args to handle dynamic config overrides
+    args, unknown = parser.parse_known_args()
     
     # Track which arguments were explicitly provided on command line
     provided_args = set()
+    additional_overrides = {}
     
-    # Check sys.argv to see what was actually provided
+    # Parse all command line arguments including unknown ones
     import sys
-    for arg in sys.argv[1:]:
+    i = 1
+    while i < len(sys.argv):
+        arg = sys.argv[i]
         if arg.startswith('--'):
             # Extract the argument name
-            arg_name = arg.split('=')[0][2:]  # Remove '--'
-            # Map to internal names
+            arg_name = arg[2:]  # Remove '--'
+            
+            # Check if it's a known argument
             if arg_name in ['batch_size', 'max_epochs', 'check_val_every_n_epoch', 
                           'log_images_every_n_epochs', 'num_workers', 'model_size',
                           'device', 'use_wandb']:
                 provided_args.add(arg_name.replace('-', '_'))
+            elif '.' in arg_name and i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith('--'):
+                # This is a dotted config override like --model.loss.gan_loss lsgan
+                value = sys.argv[i + 1]
+                # Try to parse the value
+                try:
+                    # Try to parse as number
+                    if '.' in value:
+                        value = float(value)
+                    else:
+                        value = int(value)
+                except ValueError:
+                    # Try to parse as boolean
+                    if value.lower() in ['true', 'false']:
+                        value = value.lower() == 'true'
+                    # Otherwise keep as string
+                
+                additional_overrides[arg_name] = value
+                i += 1  # Skip the value
+        i += 1
     
     # If preset is specified, show which presets are available
     if args.preset:
@@ -1046,7 +1077,8 @@ Examples:
         dry_run=args.dry_run,
         check_val_every_n_epoch=args.check_val_every_n_epoch,
         log_images_every_n_epochs=args.log_images_every_n_epochs,
-        _provided_args=provided_args  # Pass the set of explicitly provided args
+        _provided_args=provided_args,
+        _additional_overrides=additional_overrides  # Pass the additional overrides
     )
     
     if success and not args.dry_run:
