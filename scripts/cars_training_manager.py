@@ -1,425 +1,375 @@
 #!/usr/bin/env python3
 """
-CARS-FASTGAN Training Manager
-Comprehensive training orchestration with hardware optimization
-Enhanced with proper preset override handling and detailed logging
+CARS-FASTGAN Training Manager - Complete Tracking Version
+Tracks EVERY configuration value through the entire override chain
+
+Priority chain (highest to lowest):
+1. Command line arguments
+2. Preset configurations  
+3. Optimization results
+4. Config files (loaded from YAML)
 """
 
-import os
-import sys
 import json
-import argparse
 import subprocess
-import psutil
-import torch
-import torch.backends.mps
+import sys
+import os
+import argparse
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple, Union
 from datetime import datetime
-import time
 import traceback
-from dataclasses import dataclass, field
+from omegaconf import OmegaConf, DictConfig
+import yaml
+from copy import deepcopy
 
-# Add src to path
-sys.path.append(str(Path(__file__).parent.parent))
-
-# Try to import GPU utilities
-try:
-    import GPUtil
-    HAS_GPUTIL = True
-except ImportError:
-    HAS_GPUTIL = False
-
-# Rich console imports (optional but recommended)
+# Try to import rich for better output
 try:
     from rich.console import Console
-    from rich.panel import Panel
     from rich.table import Table
+    from rich.panel import Panel
+    from rich import box
+    from rich.tree import Tree
     console = Console()
-    HAS_RICH = True
+    RICH_AVAILABLE = True
 except ImportError:
     console = None
-    HAS_RICH = False
-    # Fallback printing
-    class Console:
+    RICH_AVAILABLE = False
+    # Fallback print function
+    class FakeConsole:
         def print(self, *args, **kwargs):
             print(*args)
-    console = Console()
+    console = FakeConsole()
+
+# Import hardware optimizer if available
+try:
+    from hardware_optimizer import HardwareOptimizer
+except ImportError:
+    HardwareOptimizer = None
 
 
 class ConfigTracker:
-    """Track configuration values and their sources"""
+    """Track ALL configuration values and their sources with color coding"""
+    
+    # Color codes for different sources
+    SOURCE_COLORS = {
+        'yaml_config': 'blue',          # From YAML config files
+        'optimization': 'green',        # From optimization results
+        'preset': 'yellow',             # From preset configurations
+        'command_line': 'bright_red'    # Command line overrides
+    }
+    
+    # ANSI color codes for fallback
+    ANSI_COLORS = {
+        'yaml_config': '\033[94m',   # Blue
+        'optimization': '\033[92m',  # Green
+        'preset': '\033[93m',        # Yellow
+        'command_line': '\033[91m'   # Red
+    }
+    ANSI_RESET = '\033[0m'
     
     def __init__(self):
-        self.values = {}
-        self.sources = {}
-        
+        self.values = {}      # Flat dictionary of all values
+        self.sources = {}     # Source for each value
+        self.history = []     # Track all changes
+        self.nested = {}      # Nested structure for visualization
+    
     def set_value(self, key: str, value: Any, source: str):
         """Set a configuration value and track its source"""
         old_value = self.values.get(key)
-        old_source = self.sources.get(key, "default")
+        old_source = self.sources.get(key)
+        
+        # Convert DictConfig to regular dict for comparison
+        if isinstance(value, DictConfig):
+            value = OmegaConf.to_container(value)
         
         self.values[key] = value
         self.sources[key] = source
         
-        # Log the override
-        if old_value is not None and old_value != value:
-            console.print(f"[yellow]📝 Override: {key}[/yellow]")
-            console.print(f"   [dim]Previous: {old_value} (from {old_source})[/dim]")
-            console.print(f"   [green]New: {value} (from {source})[/green]")
-        elif old_value is None:
-            console.print(f"[blue]📌 Setting: {key} = {value} (from {source})[/blue]")
+        # Update nested structure
+        self._update_nested(key, value, source)
+        
+        # Track the change
+        if old_value != value:  # Only track actual changes
+            self.history.append({
+                'key': key,
+                'old_value': old_value,
+                'new_value': value,
+                'old_source': old_source,
+                'new_source': source,
+                'timestamp': datetime.now()
+            })
+    
+    def _update_nested(self, key: str, value: Any, source: str):
+        """Update nested structure for tree visualization"""
+        parts = key.split('.')
+        current = self.nested
+        
+        for i, part in enumerate(parts[:-1]):
+            if part not in current:
+                current[part] = {}
+            current = current[part]
+        
+        current[parts[-1]] = {'value': value, 'source': source}
+    
+    def set_nested_values(self, data: Union[Dict, DictConfig], source: str, prefix: str = ''):
+        """Recursively set all values from a nested dictionary"""
+        if isinstance(data, DictConfig):
+            data = OmegaConf.to_container(data)
+        
+        if isinstance(data, dict):
+            for key, value in data.items():
+                full_key = f"{prefix}.{key}" if prefix else key
+                
+                if isinstance(value, dict):
+                    # Set the dict itself
+                    self.set_value(full_key, value, source)
+                    # Recurse into it
+                    self.set_nested_values(value, source, full_key)
+                else:
+                    self.set_value(full_key, value, source)
     
     def get_value(self, key: str, default: Any = None) -> Any:
         """Get a configuration value"""
         return self.values.get(key, default)
     
-    def get_source(self, key: str) -> str:
+    def get_source(self, key: str) -> Optional[str]:
         """Get the source of a configuration value"""
-        return self.sources.get(key, "default")
+        return self.sources.get(key)
     
-    def get_all(self) -> Dict[str, Any]:
-        """Get all configuration values"""
-        return self.values.copy()
+    def get_all_with_prefix(self, prefix: str) -> Dict[str, Any]:
+        """Get all values that start with a given prefix"""
+        return {k: v for k, v in self.values.items() if k.startswith(prefix)}
     
-    def print_summary(self):
-        """Print a summary of all configuration values and sources"""
-        console.print("\n[cyan]📊 Configuration Summary:[/cyan]")
-        console.print("=" * 60)
-        for key in sorted(self.values.keys()):
-            console.print(f"{key}: {self.values[key]} [dim](from {self.sources[key]})[/dim]")
-        console.print("=" * 60)
-
-
-class HardwareOptimizer:
-    """Optimize training configurations for available hardware"""
-    
-    def __init__(self, device: str = 'auto'):
-        self.device = self._get_device(device)
-        self.system_memory = psutil.virtual_memory().total / (1024**3)
-        self.device_info = self._get_device_info()
-        self.optimization_results = {}
-        
-        # Display hardware info
-        if HAS_RICH:
-            console.print(Panel.fit(
-                f"[bold cyan]🖥️  Hardware Optimizer[/bold cyan]\n"
-                f"   Device: {self.device}\n"
-                f"   Device Info: {self.device_info['description']}\n"
-                f"   VRAM: {self.device_info['vram_gb']:.1f} GB\n"
-                f"   System RAM: {self.system_memory:.1f} GB",
-                title="Hardware Configuration"
-            ))
-        else:
-            print("🖥️  Hardware Optimizer")
-            print(f"   Device: {self.device}")
-            print(f"   Device Info: {self.device_info['description']}")
-            print(f"   VRAM: {self.device_info['vram_gb']:.1f} GB")
-            print(f"   System RAM: {self.system_memory:.1f} GB")
-    
-    def _get_device(self, device: str) -> torch.device:
-        """Get the appropriate torch device"""
-        if device != 'auto':
-            return torch.device(device)
-        
-        if torch.cuda.is_available():
-            return torch.device('cuda')
-        elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
-            return torch.device('mps')
-        else:
-            return torch.device('cpu')
-    
-    def _get_device_info(self) -> Dict[str, Any]:
-        """Get detailed device information"""
-        info = {
-            'device': str(self.device),
-            'vram_gb': 0,
-            'description': 'Unknown',
-            'vendor': 'Unknown'
-        }
-        
-        if self.device.type == 'cuda':
-            if HAS_GPUTIL:
-                try:
-                    gpus = GPUtil.getGPUs()
-                    if gpus:
-                        gpu = gpus[0]
-                        info['vram_gb'] = gpu.memoryTotal / 1024
-                        info['description'] = gpu.name
-                        info['vendor'] = 'NVIDIA'
-                except:
-                    pass
+    def print_summary(self, filter_source: Optional[str] = None):
+        """Print configuration summary with color-coded sources"""
+        if RICH_AVAILABLE:
+            # Create a tree view
+            tree = Tree("📋 Configuration", style="bold white")
+            self._build_tree(tree, self.nested, filter_source)
+            console.print(tree)
             
-            if info['vram_gb'] == 0:  # Fallback
-                props = torch.cuda.get_device_properties(0)
-                info['vram_gb'] = props.total_memory / (1024**3)
-                info['description'] = props.name
-                info['vendor'] = 'NVIDIA'
+            # Print override chain legend
+            console.print("\n[bold]Override Priority Chain (highest → lowest):[/bold]")
+            priority_order = ['command_line', 'preset', 'optimization', 'yaml_config']
+            for source in priority_order:
+                color = self.SOURCE_COLORS[source]
+                console.print(f"  [{color}]■[/{color}] {source.replace('_', ' ').title()}")
+            
+            # Print statistics
+            source_counts = {}
+            for source in self.sources.values():
+                source_type = source.split(':')[0]
+                source_counts[source_type] = source_counts.get(source_type, 0) + 1
+            
+            console.print(f"\n[bold]Configuration Statistics:[/bold]")
+            console.print(f"Total values tracked: {len(self.values)}")
+            for source, count in source_counts.items():
+                color = self.SOURCE_COLORS.get(source, 'white')
+                console.print(f"  [{color}]{source}[/{color}]: {count} values")
+        else:
+            # Fallback to table view
+            self._print_table_view(filter_source)
+    
+    def _build_tree(self, parent: Tree, data: Dict, filter_source: Optional[str], level: int = 0):
+        """Build tree visualization"""
+        for key, value in sorted(data.items()):
+            if isinstance(value, dict) and 'value' in value and 'source' in value:
+                # Leaf node
+                source = value['source']
+                source_type = source.split(':')[0]
                 
-        elif self.device.type == 'mps':
-            info['description'] = 'Apple Silicon GPU'
-            info['vendor'] = 'Apple'
-            # Estimate based on system
-            if self.system_memory >= 32:
-                info['vram_gb'] = 24  # M1 Max/Ultra
-            elif self.system_memory >= 16:
-                info['vram_gb'] = 16  # M1 Pro
+                if filter_source and source_type != filter_source:
+                    continue
+                
+                color = self.SOURCE_COLORS.get(source_type, 'white')
+                val_str = str(value['value'])
+                if len(val_str) > 50:
+                    val_str = val_str[:47] + "..."
+                
+                parent.add(f"[cyan]{key}[/cyan] = {val_str} [{color}]({source})[/{color}]")
             else:
-                info['vram_gb'] = 8   # M1
-                
-        else:
-            info['description'] = 'CPU'
-            info['vendor'] = 'CPU'
-            info['vram_gb'] = self.system_memory * 0.8  # Can use most system RAM
-        
-        return info
+                # Branch node
+                branch = parent.add(f"[bold cyan]{key}[/bold cyan]")
+                self._build_tree(branch, value, filter_source, level + 1)
     
-    def benchmark_configurations(self, configs: Optional[List[Dict]] = None) -> Dict[str, Any]:
-        """Benchmark different model configurations"""
-        if configs is None:
-            configs = self._get_default_configs()
+    def _print_table_view(self, filter_source: Optional[str] = None):
+        """Print table view for non-rich environments"""
+        print("\n=== Configuration Summary ===")
+        print(f"{'Key':<40} {'Value':<30} {'Source'}")
+        print("-" * 90)
         
-        results = []
-        
-        for config in configs:
-            console.print(f"\n[yellow]Testing {config['name']}...[/yellow]")
-            result = self._benchmark_config(config)
-            results.append(result)
+        for key in sorted(self.values.keys()):
+            source = self.sources[key]
+            source_type = source.split(':')[0]
             
-            if result['batch_results']:
-                optimal = result['batch_results'][-1]
-                console.print(f"   ✓ Max batch size: {optimal['batch_size']}")
-                console.print(f"   ✓ Throughput: {optimal['throughput']:.1f} img/s")
-        
-        self.optimization_results = {
-            'device_info': self.device_info,
-            'system_memory_gb': self.system_memory,
-            'results': results,
-            'timestamp': datetime.now().isoformat(),
-            'recommendations': self._generate_recommendations(results)
-        }
-        
-        return self.optimization_results['recommendations']
+            if filter_source and source_type != filter_source:
+                continue
+            
+            value = str(self.values[key])
+            if len(value) > 30:
+                value = value[:27] + "..."
+            
+            color = self.ANSI_COLORS.get(source_type, '')
+            print(f"{key:<40} {value:<30} {color}{source}{self.ANSI_RESET}")
     
-    def _get_default_configs(self) -> List[Dict[str, Any]]:
-        """Get default configurations to test"""
-        return [
-            {'name': 'Micro', 'ngf': 32, 'ndf': 32, 'n_layers': 3},
-            {'name': 'Small', 'ngf': 48, 'ndf': 48, 'n_layers': 3},
-            {'name': 'Standard', 'ngf': 64, 'ndf': 64, 'n_layers': 4},
-            {'name': 'Large', 'ngf': 96, 'ndf': 96, 'n_layers': 4},
-        ]
+    def print_history(self, last_n: Optional[int] = None):
+        """Print the configuration change history"""
+        history_to_show = self.history[-last_n:] if last_n else self.history
+        
+        if not history_to_show:
+            console.print("[dim]No configuration changes recorded[/dim]")
+            return
+        
+        if RICH_AVAILABLE:
+            console.print(f"\n[bold]Configuration Override History ({len(history_to_show)} changes):[/bold]")
+            for change in history_to_show:
+                old_source_type = change['old_source'].split(':')[0] if change['old_source'] else 'default'
+                new_source_type = change['new_source'].split(':')[0]
+                old_color = self.SOURCE_COLORS.get(old_source_type, 'white')
+                new_color = self.SOURCE_COLORS.get(new_source_type, 'white')
+                
+                old_val = str(change['old_value'])
+                new_val = str(change['new_value'])
+                
+                if len(old_val) > 20:
+                    old_val = old_val[:17] + "..."
+                if len(new_val) > 20:
+                    new_val = new_val[:17] + "..."
+                
+                console.print(
+                    f"  {change['key']}: "
+                    f"[{old_color}]{old_val}[/{old_color}] → "
+                    f"[{new_color}]{new_val}[/{new_color}]"
+                )
+        else:
+            print(f"\n=== Configuration Override History ({len(history_to_show)} changes) ===")
+            for change in history_to_show:
+                print(f"  {change['key']}: {change['old_value']} → {change['new_value']}")
     
-    def _benchmark_config(self, config: Dict[str, Any]) -> Dict[str, Any]:
-        """Benchmark a single configuration"""
-        from src.models.fastgan import FastGAN
-        
-        result = {
-            'config_name': config['name'],
-            'ngf': config['ngf'],
-            'ndf': config['ndf'],
-            'batch_results': []
-        }
-        
-        # Test different batch sizes
-        batch_sizes = [1, 2, 4, 8, 16, 32, 64]
-        
-        for batch_size in batch_sizes:
-            try:
-                # Create model
-                model = FastGAN(
-                    img_size=512,
-                    channels=1,
-                    latent_dim=256,
-                    ngf=config['ngf'],
-                    ndf=config['ndf'],
-                    n_layers=config['n_layers']
-                ).to(self.device)
-                
-                # Test forward pass
-                start_time = time.time()
-                
-                # Warmup
-                for _ in range(3):
-                    noise = torch.randn(batch_size, 256).to(self.device)
-                    with torch.no_grad():
-                        _ = model.generator(noise)
-                
-                # Actual benchmark
-                num_iterations = 10
-                torch.cuda.synchronize() if self.device.type == 'cuda' else None
-                
-                bench_start = time.time()
-                for _ in range(num_iterations):
-                    noise = torch.randn(batch_size, 256).to(self.device)
-                    with torch.no_grad():
-                        _ = model.generator(noise)
-                
-                torch.cuda.synchronize() if self.device.type == 'cuda' else None
-                bench_time = time.time() - bench_start
-                
-                throughput = (batch_size * num_iterations) / bench_time
-                
-                # Get memory usage
-                if self.device.type == 'cuda':
-                    peak_memory = torch.cuda.max_memory_allocated() / (1024**3)
-                    torch.cuda.reset_peak_memory_stats()
-                else:
-                    peak_memory = psutil.Process().memory_info().rss / (1024**3)
-                
-                result['batch_results'].append({
-                    'batch_size': batch_size,
-                    'throughput': throughput,
-                    'peak_memory': peak_memory,
-                    'time_per_batch': bench_time / num_iterations
-                })
-                
-                del model
-                torch.cuda.empty_cache() if self.device.type == 'cuda' else None
-                
-            except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
-                # Hit memory limit
-                console.print(f"   [red]✗ Batch size {batch_size} failed: OOM[/red]")
-                break
-        
-        return result
-    
-    def _generate_recommendations(self, results: List[Dict]) -> Dict[str, Any]:
-        """Generate recommendations based on benchmark results"""
-        recommendations = {}
-        
-        # Find configuration with best throughput
-        best_throughput = 0
-        best_config = None
-        best_batch = None
-        
-        for result in results:
-            if result['batch_results']:
-                # Get the largest working batch size
-                optimal = result['batch_results'][-1]
-                if optimal['throughput'] > best_throughput:
-                    best_throughput = optimal['throughput']
-                    best_config = result['config_name']
-                    best_batch = optimal['batch_size']
-        
-        recommendations['optimal_config'] = best_config
-        recommendations['optimal_settings'] = {
-            'batch_size': best_batch,
-            'precision': '16-mixed' if self.device.type == 'cuda' else '32-true'
-        }
-        
-        # Device-specific optimizations
-        if self.device.type == 'mps':
-            recommendations['optimal_settings']['optimization_flags'] = [
-                'export PYTORCH_MPS_HIGH_WATERMARK_RATIO=0.7',
-                'export PYTORCH_ENABLE_MPS_FALLBACK=1'
-            ]
-        
-        return recommendations
-    
-    def save_optimization_results(self, output_dir: Path):
-        """Save optimization results"""
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Save JSON results
-        with open(output_dir / 'optimization_results.json', 'w') as f:
-            json.dump(self.optimization_results, f, indent=2)
-        
-        # Save recommendations
-        with open(output_dir / 'recommendations.json', 'w') as f:
-            json.dump(self.optimization_results['recommendations'], f, indent=2)
-        
-        console.print(f"\n[green]✓ Results saved to {output_dir}[/green]")
+    def get_overrides_from_base(self, base_source: str = 'yaml_config') -> Dict[str, Tuple[Any, str]]:
+        """Get all values that override the base configuration"""
+        overrides = {}
+        for key, value in self.values.items():
+            source = self.sources[key]
+            if source != base_source:
+                overrides[key] = (value, source)
+        return overrides
 
 
 class CARSTrainingManager:
-    """Main training orchestration class"""
+    """CARS-FASTGAN Training Manager with complete configuration tracking"""
     
-    def __init__(self):
-        self.project_root = Path(__file__).parent.parent
-        self.scripts_dir = self.project_root / "scripts"
+    def __init__(self, project_root: Optional[Path] = None):
+        self.project_root = project_root or Path.cwd()
         self.experiments_dir = self.project_root / "experiments"
+        self.checkpoints_dir = self.experiments_dir / "checkpoints"
         self.configs_dir = self.project_root / "configs"
-        
-        # Ensure directories exist
-        self.experiments_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Initialize config tracker
         self.config_tracker = ConfigTracker()
         
-        # Print header
-        self._print_header()
-    
-    def _print_header(self):
-        """Print welcome header"""
-        if HAS_RICH:
-            console.print(Panel.fit(
-                "[bold cyan]🚀 CARS Training Manager[/bold cyan]\n"
-                f"[dim]📁 Project root: {self.project_root}[/dim]",
+        # Load base configuration from YAML files
+        self.base_config = self._load_complete_config()
+        
+        # Track ALL base configuration values
+        console.print("\n[blue]📄 Loading and tracking base configuration from YAML files...[/blue]")
+        self.config_tracker.set_nested_values(self.base_config, 'yaml_config')
+        
+        # Print banner
+        if RICH_AVAILABLE:
+            console.print(Panel(
+                "[bold cyan]🚀 CARS-FASTGAN Training Manager[/bold cyan]\n"
+                f"[dim]📁 Project root: {self.project_root}[/dim]\n"
+                f"[dim]📊 Tracking {len(self.config_tracker.values)} configuration values[/dim]",
                 border_style="cyan"
             ))
-        else:
-            print("╭────────────── CARS-FASTGAN ──────────────╮")
-            print("│ 🚀 CARS Training Manager                 │")
-            print(f"│ 📁 Project root: {self.project_root} │")
-            print("╰──────────────────────────────────────────╯")
+    
+    def _load_complete_config(self) -> DictConfig:
+        """Load complete configuration from YAML files using OmegaConf"""
+        config_file = self.configs_dir / "config.yaml"
+        
+        if not config_file.exists():
+            console.print(f"[yellow]Warning: config.yaml not found at {config_file}[/yellow]")
+            return OmegaConf.create({})
+        
+        try:
+            # Load with OmegaConf to handle includes and interpolations
+            cfg = OmegaConf.load(config_file)
+            
+            # Load additional configs based on defaults
+            if 'defaults' in cfg:
+                for default_item in cfg.defaults:
+                    if isinstance(default_item, str) and default_item != '_self_':
+                        # Simple default reference
+                        self._load_default_config(cfg, default_item)
+                    elif isinstance(default_item, dict):
+                        # Structured default with path
+                        for category, file_name in default_item.items():
+                            self._load_default_config(cfg, file_name, category)
+            
+            # Resolve all interpolations
+            OmegaConf.resolve(cfg)
+            
+            console.print(f"[green]✓ Loaded complete configuration from {config_file}[/green]")
+            return cfg
+            
+        except Exception as e:
+            console.print(f"[red]Error loading config: {e}[/red]")
+            traceback.print_exc()
+            return OmegaConf.create({})
+    
+    def _load_default_config(self, cfg: DictConfig, file_name: str, category: Optional[str] = None):
+        """Load a default configuration file"""
+        # Try different paths
+        possible_paths = [
+            self.configs_dir / f"{file_name}.yaml",
+            self.configs_dir / category / f"{file_name}.yaml" if category else None,
+        ]
+        
+        # Also check in subdirectories if category not specified
+        if not category:
+            for subdir in ['data', 'model', 'training', 'evaluation']:
+                possible_paths.append(self.configs_dir / subdir / f"{file_name}.yaml")
+        
+        for path in possible_paths:
+            if path and path.exists():
+                try:
+                    sub_cfg = OmegaConf.load(path)
+                    
+                    # Determine where to merge this config
+                    if category:
+                        cfg[category] = OmegaConf.merge(cfg.get(category, {}), sub_cfg)
+                    else:
+                        # Infer from filename
+                        if 'data' in file_name:
+                            cfg.data = OmegaConf.merge(cfg.get('data', {}), sub_cfg)
+                        elif 'model' in file_name:
+                            cfg.model = OmegaConf.merge(cfg.get('model', {}), sub_cfg)
+                        elif 'training' in file_name:
+                            cfg.training = OmegaConf.merge(cfg.get('training', {}), sub_cfg)
+                        elif 'evaluation' in file_name:
+                            cfg.evaluation = OmegaConf.merge(cfg.get('evaluation', {}), sub_cfg)
+                    
+                    console.print(f"[dim]  ✓ Loaded {path}[/dim]")
+                    break
+                except Exception as e:
+                    console.print(f"[yellow]  Warning: Error loading {path}: {e}[/yellow]")
     
     def get_experiment_presets(self) -> Dict[str, Dict]:
         """Get predefined experiment configurations from configs/training_presets.json"""
-        # Load from the official training_presets.json file
         presets_file = self.configs_dir / "training_presets.json"
         
         if presets_file.exists():
             try:
                 with open(presets_file, 'r') as f:
                     data = json.load(f)
-                    presets = data.get('presets', {})
-                    console.print(f"[green]✓ Loaded presets from {presets_file}[/green]")
-                    return presets
+                    return data.get('presets', {})
             except Exception as e:
-                console.print(f"[yellow]Warning: Failed to load presets from {presets_file}: {e}[/yellow]")
-                console.print("[yellow]Using fallback presets[/yellow]")
-        else:
-            console.print(f"[yellow]Warning: Presets file not found at {presets_file}[/yellow]")
-            console.print("[yellow]Using fallback presets[/yellow]")
+                console.print(f"[yellow]Warning: Failed to load presets: {e}[/yellow]")
         
-        # Fallback to minimal presets if file not found
-        return {
-            'baseline': {
-                'description': 'Baseline FASTGAN configuration',
-                'model_size': 'standard',
-                'batch_size': 8,
-                'max_epochs': 1000,
-                'loss': {
-                    'gan_loss': 'hinge',
-                    'feature_matching_weight': 10.0
-                },
-                'optimizer': {
-                    'generator': {'lr': 0.0002},
-                    'discriminator': {'lr': 0.0002}
-                }
-            },
-            'small_dataset': {
-                'description': 'Optimized for small datasets like CARS microscopy',
-                'model_size': 'standard',
-                'batch_size': 8,
-                'max_epochs': 2000,
-                'check_val_every_n_epoch': 1,
-                'log_images_every_n_epochs': 1,
-                'loss': {
-                    'gan_loss': 'hinge',
-                    'feature_matching_weight': 20.0
-                },
-                'optimizer': {
-                    'generator': {'lr': 0.0001},
-                    'discriminator': {'lr': 0.0004}
-                }
-            }
-        }
+        return {}
     
     def get_model_config(self, model_size: str) -> Dict[str, Any]:
-        """Get model configuration by size"""
-        # First try to load from training_presets.json
+        """Get model configuration by size from training_presets.json"""
         presets_file = self.configs_dir / "training_presets.json"
         
         if presets_file.exists():
@@ -432,31 +382,11 @@ class CARSTrainingManager:
             except Exception:
                 pass
         
-        # Fallback to hardcoded configs
-        configs = {
-            'micro': {
-                'generator': {'ngf': 32, 'n_layers': 3},
-                'discriminator': {'ndf': 32, 'n_layers': 2}
-            },
-            'small': {
-                'generator': {'ngf': 48, 'n_layers': 3},
-                'discriminator': {'ndf': 48, 'n_layers': 3}
-            },
-            'standard': {
-                'generator': {'ngf': 64, 'n_layers': 4},
-                'discriminator': {'ndf': 64, 'n_layers': 3}
-            },
-            'large': {
-                'generator': {'ngf': 96, 'n_layers': 4},
-                'discriminator': {'ndf': 96, 'n_layers': 4}
-            },
-            'xlarge': {
-                'generator': {'ngf': 128, 'n_layers': 5},
-                'discriminator': {'ndf': 128, 'n_layers': 4}
-            }
+        # Fallback
+        return {
+            'generator': {'ngf': 64, 'n_layers': 4},
+            'discriminator': {'ndf': 64, 'n_layers': 3}
         }
-        
-        return configs.get(model_size.lower(), configs['standard'])
     
     def launch_training(
         self,
@@ -464,26 +394,26 @@ class CARSTrainingManager:
         experiment_name: Optional[str] = None,
         model_size: str = 'standard',
         batch_size: Optional[int] = None,
-        max_epochs: int = 1000,
+        max_epochs: Optional[int] = None,
         preset: Optional[str] = None,
-        use_wandb: bool = False,
+        use_wandb: Optional[bool] = None,
         wandb_project: Optional[str] = None,
         device: str = 'auto',
-        num_workers: int = 4,
+        num_workers: Optional[int] = None,
         resume_checkpoint: Optional[str] = None,
         additional_config: Optional[Dict] = None,
         dry_run: bool = False,
         check_val_every_n_epoch: Optional[int] = None,
         log_images_every_n_epochs: Optional[int] = None
     ) -> bool:
-        """Launch training with specified configuration"""
+        """Launch training with complete configuration tracking"""
         
-        console.print("\n[cyan]🔧 Building Configuration[/cyan]")
-        console.print("Priority: command-line > preset > optimization > defaults")
+        console.print("\n[cyan]🔧 Building Configuration with Full Tracking[/cyan]")
         console.print("=" * 60)
         
-        # Reset config tracker for this launch
+        # Create a fresh config tracker starting with base config
         self.config_tracker = ConfigTracker()
+        self.config_tracker.set_nested_values(self.base_config, 'yaml_config')
         
         # Validate data path
         data_path = Path(data_path).resolve()
@@ -491,102 +421,298 @@ class CARSTrainingManager:
             console.print(f"[red]❌ Data path not found: {data_path}[/red]")
             return False
         
-        # Step 1: Load default values from config files
-        self.config_tracker.set_value('model_size', model_size, 'default')
-        self.config_tracker.set_value('batch_size', 16, 'default')  # Default batch size
-        self.config_tracker.set_value('max_epochs', 1000, 'default')
-        self.config_tracker.set_value('check_val_every_n_epoch', 10, 'config_file')  # From config file
-        self.config_tracker.set_value('log_images_every_n_epochs', 25, 'config_file')  # From config file
-        
-        # Step 2: Apply optimization results if available
+        # Apply optimization results if available
         optimization_results = self._load_optimization_results()
         if optimization_results:
-            optimal_config = optimization_results.get('optimal_config', '').lower()
-            optimal_settings = optimization_results.get('optimal_settings', {})
-            
-            if optimal_config:
-                self.config_tracker.set_value('model_size', optimal_config, 'optimization')
-            if 'batch_size' in optimal_settings:
-                self.config_tracker.set_value('batch_size', optimal_settings['batch_size'], 'optimization')
+            console.print("\n[green]🔧 Applying optimization results...[/green]")
+            self._apply_optimization_results(optimization_results)
         
-        # Step 3: Apply preset if specified
+        # Apply preset if specified
+        preset_config = {}
         if preset:
-            preset_config = self._get_preset_config(preset)
-            
-            # Apply preset values
-            for key in ['model_size', 'batch_size', 'max_epochs', 'check_val_every_n_epoch', 'log_images_every_n_epochs']:
-                if key in preset_config and preset_config[key] is not None:
-                    self.config_tracker.set_value(key, preset_config[key], f'preset:{preset}')
-            
-            # Store other preset configs for later use
-            preset_config['preset_name'] = preset
-        else:
-            preset_config = {}
+            console.print(f"\n[yellow]📋 Applying preset: {preset}[/yellow]")
+            preset_config = self._apply_preset(preset)
         
-        # Step 4: Apply command-line overrides (highest priority)
-        if model_size != 'standard':  # Only if not default
-            self.config_tracker.set_value('model_size', model_size, 'command_line')
+        # Apply command-line overrides - only for explicitly provided values
+        console.print("\n[bright_red]⚡ Applying command-line overrides...[/bright_red]")
+        
+        # Build kwargs with only explicitly provided values
+        override_kwargs = {}
+        
+        # Check each parameter against its default
+        if model_size != 'standard':
+            override_kwargs['model_size'] = model_size
         if batch_size is not None:
-            self.config_tracker.set_value('batch_size', batch_size, 'command_line')
-        if max_epochs != 1000:  # Only if not default
-            self.config_tracker.set_value('max_epochs', max_epochs, 'command_line')
+            override_kwargs['batch_size'] = batch_size
+        if max_epochs is not None:
+            override_kwargs['max_epochs'] = max_epochs
         if check_val_every_n_epoch is not None:
-            self.config_tracker.set_value('check_val_every_n_epoch', check_val_every_n_epoch, 'command_line')
+            override_kwargs['check_val_every_n_epoch'] = check_val_every_n_epoch
         if log_images_every_n_epochs is not None:
-            self.config_tracker.set_value('log_images_every_n_epochs', log_images_every_n_epochs, 'command_line')
+            override_kwargs['log_images_every_n_epochs'] = log_images_every_n_epochs
+        if num_workers is not None:
+            override_kwargs['num_workers'] = num_workers
+        if use_wandb is not None:
+            override_kwargs['use_wandb'] = use_wandb
+        if device != 'auto':
+            override_kwargs['device'] = device
         
-        # Print configuration summary
-        self.config_tracker.print_summary()
+        # Always set these as they're required
+        override_kwargs['data_path'] = str(data_path)
+        override_kwargs['experiment_name'] = experiment_name or self._generate_experiment_name(preset or model_size)
         
-        # Build final configuration
-        config = {
-            'experiment_name': experiment_name or self._generate_experiment_name(preset or self.config_tracker.get_value('model_size')),
-            'data_path': str(data_path),
-            'model_size': self.config_tracker.get_value('model_size'),
-            'batch_size': self.config_tracker.get_value('batch_size'),
-            'max_epochs': self.config_tracker.get_value('max_epochs'),
-            'check_val_every_n_epoch': self.config_tracker.get_value('check_val_every_n_epoch'),
-            'log_images_every_n_epochs': self.config_tracker.get_value('log_images_every_n_epochs'),
-            'use_wandb': use_wandb,
-            'device': device,
-            'num_workers': num_workers,
-        }
-        
-        # Get model configuration
-        model_config = self.get_model_config(config['model_size'])
-        config['model'] = model_config
-        
-        # Add preset-specific configurations
-        if preset_config:
-            for key in ['loss', 'optimizer', 'training', 'callbacks']:
-                if key in preset_config:
-                    config[key] = preset_config[key]
-            if 'preset_name' in preset_config:
-                config['preset_name'] = preset_config['preset_name']
+        self._apply_command_line_overrides(**override_kwargs)
         
         # Apply additional config if provided
         if additional_config:
-            self._merge_configs(config, additional_config)
+            console.print("\n[magenta]📝 Applying additional configuration...[/magenta]")
+            self.config_tracker.set_nested_values(additional_config, 'additional_config')
         
-        # Build and execute command
-        cmd = self._build_launch_command(config)
+        # Print configuration summary
+        console.print("\n[bold]📊 Final Configuration Summary:[/bold]")
+        self.config_tracker.print_summary()
         
-        # Add resume checkpoint if provided
-        if resume_checkpoint:
-            cmd.append(f"+resume_from_checkpoint={resume_checkpoint}")
+        # Print override history
+        console.print("\n[bold]📜 Override History:[/bold]")
+        self.config_tracker.print_history(last_n=20)  # Show last 20 changes
         
-        # Save configuration
-        self._save_configuration(config)
+        # Get all overrides from base
+        overrides = self.config_tracker.get_overrides_from_base()
+        console.print(f"\n[bold]Total overrides from base configuration: {len(overrides)}[/bold]")
+        
+        # Build command with complete config file instead of overrides
+        config_file = self._write_complete_config_file(wandb_project, resume_checkpoint)
+        cmd = self._build_command_with_config_file(config_file)
+        
+        # Save complete configuration
+        self._save_complete_configuration()
         
         if dry_run:
-            console.print("\n[yellow]🔍 Dry run - Configuration:[/yellow]")
-            console.print(json.dumps(config, indent=2))
-            console.print("\n[yellow]📋 Command that would be executed:[/yellow]")
-            console.print(" ".join(cmd))
+            console.print("\n[yellow]🔍 Dry run - Command that would be executed:[/yellow]")
+            console.print(" ".join(cmd[:3]))
+            for c in cmd[3:]:
+                console.print(f"    {c} \\")
+            
+            console.print(f"\n[yellow]Total command line arguments: {len(cmd) - 2}[/yellow]")
             return True
         
         # Launch training
         return self._execute_training(cmd)
+    
+    def _apply_optimization_results(self, optimization_results: Dict[str, Any]):
+        """Apply optimization results to configuration"""
+        optimal_config = optimization_results.get('optimal_config', '').lower()
+        optimal_settings = optimization_results.get('optimal_settings', {})
+        
+        if optimal_config:
+            # Apply model size
+            model_config = self.get_model_config(optimal_config)
+            for key, value in model_config.get('generator', {}).items():
+                self.config_tracker.set_value(f'model.generator.{key}', value, 'optimization')
+            for key, value in model_config.get('discriminator', {}).items():
+                self.config_tracker.set_value(f'model.discriminator.{key}', value, 'optimization')
+        
+        if 'batch_size' in optimal_settings:
+            self.config_tracker.set_value('data.batch_size', optimal_settings['batch_size'], 'optimization')
+    
+    def _apply_preset(self, preset: str) -> Dict[str, Any]:
+        """Apply preset configuration"""
+        preset_config = self._get_preset_config(preset)
+        
+        # Apply all preset values recursively
+        def apply_preset_values(config: Dict, prefix: str = ''):
+            for key, value in config.items():
+                if key in ['description', 'preset_name']:
+                    continue
+                
+                full_key = f"{prefix}.{key}" if prefix else key
+                
+                # Map certain preset keys to config keys
+                key_mappings = {
+                    'model_size': None,  # Special handling below
+                    'batch_size': 'data.batch_size',
+                    'max_epochs': 'max_epochs',
+                    'check_val_every_n_epoch': 'check_val_every_n_epoch',
+                    'log_images_every_n_epochs': 'log_images_every_n_epochs',
+                }
+                
+                if key in key_mappings:
+                    if key == 'model_size':
+                        # Apply model configuration
+                        model_config = self.get_model_config(value)
+                        for mkey, mvalue in model_config.get('generator', {}).items():
+                            self.config_tracker.set_value(f'model.generator.{mkey}', mvalue, f'preset:{preset}')
+                        for mkey, mvalue in model_config.get('discriminator', {}).items():
+                            self.config_tracker.set_value(f'model.discriminator.{mkey}', mvalue, f'preset:{preset}')
+                    elif key_mappings[key]:
+                        self.config_tracker.set_value(key_mappings[key], value, f'preset:{preset}')
+                elif isinstance(value, dict):
+                    # Nested configuration
+                    if key == 'loss':
+                        for lkey, lvalue in value.items():
+                            self.config_tracker.set_value(f'model.loss.{lkey}', lvalue, f'preset:{preset}')
+                    elif key == 'optimizer':
+                        for opt_type, opt_config in value.items():
+                            for okey, ovalue in opt_config.items():
+                                self.config_tracker.set_value(f'model.optimizer.{opt_type}.{okey}', ovalue, f'preset:{preset}')
+                    elif key == 'training':
+                        for tkey, tvalue in value.items():
+                            self.config_tracker.set_value(f'model.training.{tkey}', tvalue, f'preset:{preset}')
+                    else:
+                        apply_preset_values(value, full_key)
+                else:
+                    # Direct value
+                    self.config_tracker.set_value(full_key, value, f'preset:{preset}')
+        
+        apply_preset_values(preset_config)
+        preset_config['preset_name'] = preset
+        return preset_config
+    
+    def _apply_command_line_overrides(self, **kwargs):
+        """Apply command-line overrides - only for explicitly provided values"""
+        # Map command line arguments to configuration keys
+        arg_mappings = {
+            'model_size': None,  # Special handling
+            'batch_size': 'data.batch_size',
+            'max_epochs': 'max_epochs',
+            'check_val_every_n_epoch': 'check_val_every_n_epoch',
+            'log_images_every_n_epochs': 'log_images_every_n_epochs',
+            'num_workers': 'data.num_workers',
+            'use_wandb': 'use_wandb',
+            'device': 'device',
+            'data_path': 'data_path',
+            'experiment_name': 'experiment_name',
+        }
+        
+        for arg, config_key in arg_mappings.items():
+            if arg in kwargs:
+                if arg == 'model_size':
+                    # Apply model configuration
+                    model_config = self.get_model_config(kwargs[arg])
+                    for key, value in model_config.get('generator', {}).items():
+                        self.config_tracker.set_value(f'model.generator.{key}', value, 'command_line')
+                    for key, value in model_config.get('discriminator', {}).items():
+                        self.config_tracker.set_value(f'model.discriminator.{key}', value, 'command_line')
+                elif config_key:
+                    self.config_tracker.set_value(config_key, kwargs[arg], 'command_line')
+    
+    def _write_complete_config_file(self, wandb_project: Optional[str], resume_checkpoint: Optional[str]) -> Path:
+        """Write complete configuration to a YAML file"""
+        # Create a complete configuration dictionary from tracked values
+        complete_config = {}
+        
+        # Build nested structure from flat keys
+        for key, value in self.config_tracker.values.items():
+            parts = key.split('.')
+            current = complete_config
+            
+            for part in parts[:-1]:
+                if part not in current:
+                    current[part] = {}
+                current = current[part]
+            
+            # Convert values to appropriate types for YAML
+            if isinstance(value, Path):
+                value = str(value)
+            elif isinstance(value, DictConfig):
+                value = OmegaConf.to_container(value)
+            
+            current[parts[-1]] = value
+        
+        # Add special values that might not be tracked
+        if wandb_project and 'wandb' in complete_config:
+            complete_config['wandb']['project'] = wandb_project
+        
+        if resume_checkpoint:
+            complete_config['ckpt_path'] = str(resume_checkpoint)
+        
+        # Ensure experiment name is at top level
+        experiment_name = self.config_tracker.get_value('experiment_name')
+        complete_config['experiment_name'] = experiment_name
+        
+        # Write to file
+        config_dir = self.experiments_dir / "run_configs"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        
+        config_file = config_dir / f"{experiment_name}_config.yaml"
+        
+        # Save with OmegaConf to handle special types properly
+        OmegaConf.save(complete_config, config_file)
+        
+        console.print(f"[green]✓ Wrote complete configuration to: {config_file}[/green]")
+        
+        # Also save a human-readable version with sources
+        annotated_file = config_dir / f"{experiment_name}_config_annotated.yaml"
+        with open(annotated_file, 'w') as f:
+            f.write("# CARS-FASTGAN Configuration with Sources\n")
+            f.write(f"# Generated: {datetime.now().isoformat()}\n")
+            f.write(f"# Experiment: {experiment_name}\n\n")
+            
+            # Write config with source annotations
+            self._write_annotated_config(f, complete_config, self.config_tracker.sources)
+        
+        return config_file
+    
+    def _write_annotated_config(self, f, config: Dict, sources: Dict[str, str], prefix: str = '', indent: int = 0):
+        """Write config with source annotations"""
+        for key, value in config.items():
+            full_key = f"{prefix}.{key}" if prefix else key
+            source = sources.get(full_key, 'unknown')
+            
+            spaces = '  ' * indent
+            
+            if isinstance(value, dict):
+                f.write(f"{spaces}{key}:  # [{source}]\n")
+                self._write_annotated_config(f, value, sources, full_key, indent + 1)
+            else:
+                f.write(f"{spaces}{key}: {value}  # [{source}]\n")
+    
+    def _build_command_with_config_file(self, config_file: Path) -> List[str]:
+        """Build command using config file"""
+        cmd = ["python", "main.py", "--config-file", str(config_file)]
+        return cmd
+    
+    def _save_complete_configuration(self):
+        """Save complete configuration with all tracking information"""
+        config_dir = self.experiments_dir / "configs"
+        config_dir.mkdir(parents=True, exist_ok=True)
+        
+        experiment_name = self.config_tracker.get_value('experiment_name')
+        
+        # Save complete tracked configuration
+        config_data = {
+            'experiment_name': experiment_name,
+            'timestamp': datetime.now().isoformat(),
+            'values': self.config_tracker.values,
+            'sources': self.config_tracker.sources,
+            'history': [
+                {
+                    'key': h['key'],
+                    'old_value': str(h['old_value'])[:100],  # Limit length
+                    'new_value': str(h['new_value'])[:100],
+                    'old_source': h['old_source'],
+                    'new_source': h['new_source']
+                }
+                for h in self.config_tracker.history
+            ],
+            'statistics': {
+                'total_values': len(self.config_tracker.values),
+                'total_overrides': len(self.config_tracker.get_overrides_from_base()),
+                'sources': {}
+            }
+        }
+        
+        # Count sources
+        for source in self.config_tracker.sources.values():
+            source_type = source.split(':')[0]
+            config_data['statistics']['sources'][source_type] = \
+                config_data['statistics']['sources'].get(source_type, 0) + 1
+        
+        config_file = config_dir / f"{experiment_name}_complete_config.json"
+        with open(config_file, 'w') as f:
+            json.dump(config_data, f, indent=2)
+        
+        console.print(f"[dim]💾 Saved complete configuration to {config_file}[/dim]")
     
     def _get_preset_config(self, preset: str) -> Dict[str, Any]:
         """Get predefined configuration preset"""
@@ -595,105 +721,42 @@ class CARSTrainingManager:
         if preset not in presets:
             raise ValueError(f"Unknown preset: {preset}. Available: {list(presets.keys())}")
         
-        # Return the full preset config
         return presets[preset].copy()
     
-    def _build_launch_command(self, config: Dict[str, Any]) -> List[str]:
-        """Build the training command with all overrides"""
-        cmd = [
-            "python", "main.py",
-            f"experiment_name={config['experiment_name']}",
-            f"data_path={config['data_path']}",
-            f"max_epochs={config['max_epochs']}",
-            "gradient_clip_val=0",  # Disable gradient clipping for manual optimization
-        ]
+    def _load_optimization_results(self) -> Optional[Dict[str, Any]]:
+        """Load cached optimization results"""
+        opt_file = self.project_root / "scripts/optimization_results/recommendations.json"
         
-        # CRITICAL: Add top-level config overrides FIRST
-        if 'check_val_every_n_epoch' in config and config['check_val_every_n_epoch'] is not None:
-            cmd.append(f"check_val_every_n_epoch={config['check_val_every_n_epoch']}")
+        if opt_file.exists():
+            try:
+                with open(opt_file, 'r') as f:
+                    return json.load(f)
+            except Exception:
+                pass
         
-        if 'log_images_every_n_epochs' in config and config['log_images_every_n_epochs'] is not None:
-            cmd.append(f"log_images_every_n_epochs={config['log_images_every_n_epochs']}")
-        
-        # Handle special presets
-        if config.get('preset_name') == 'improved':
-            cmd.append("model=fastgan_improved")
-        elif config.get('preset_name') == 'small_dataset':
-            cmd.append("model=fastgan_improved")
-            cmd.append("model.training.ema_decay=0.95")
-        
-        # Add model configuration
-        if 'model' in config:
-            for model_key, model_value in config['model'].items():
-                if isinstance(model_value, dict):
-                    for sub_key, sub_value in model_value.items():
-                        cmd.append(f"model.{model_key}.{sub_key}={sub_value}")
-                else:
-                    cmd.append(f"model.{model_key}={model_value}")
-        
-        # Add data configuration
-        cmd.append(f"data.batch_size={config['batch_size']}")
-        cmd.append(f"data.num_workers={config.get('num_workers', 4)}")
-        
-        # Add other configurations
-        if 'loss' in config:
-            for key, value in config['loss'].items():
-                cmd.append(f"model.loss.{key}={value}")
-        
-        if 'optimizer' in config:
-            for opt_type in ['generator', 'discriminator']:
-                if opt_type in config['optimizer']:
-                    for key, value in config['optimizer'][opt_type].items():
-                        cmd.append(f"model.optimizer.{opt_type}.{key}={value}")
-        
-        if 'training' in config:
-            for key, value in config['training'].items():
-                cmd.append(f"model.training.{key}={value}")
-        
-        if config.get('use_wandb'):
-            cmd.append("use_wandb=true")
-            if 'wandb_project' in config:
-                cmd.append(f"wandb.project={config['wandb_project']}")
-        
-        # Device configuration
-        device = config.get('device', 'auto')
-        if device != 'auto':
-            if device in ['gpu', 'cuda']:
-                cmd.extend(['accelerator=gpu', 'devices=1'])
-            elif device == 'mps':
-                cmd.extend(['accelerator=mps', 'devices=1'])
-            elif device == 'cpu':
-                cmd.extend(['accelerator=cpu', 'devices=1'])
-        
-        return cmd
+        return None
+    
+    def _generate_experiment_name(self, base_name: Optional[str] = None) -> str:
+        """Generate unique experiment name"""
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        if base_name:
+            return f"{base_name}_{timestamp}"
+        return f"cars_fastgan_{timestamp}"
     
     def _execute_training(self, cmd: List[str]) -> bool:
         """Execute the training command"""
-        console.print("\n[green]📋 Training Configuration:[/green]")
-        console.print(f"   Command: {' '.join(cmd[:3])}...")
-        
-        console.print("\n[green]🚀 Launching training...[/green]")
+        console.print(f"\n[green]🚀 Launching training...[/green]")
         console.print("=" * 60)
         
         try:
-            # Change to project root
-            os.chdir(self.project_root)
-            
-            # Run training
-            result = subprocess.run(cmd, check=True)
-            
+            result = subprocess.run(cmd, cwd=self.project_root, check=True)
             console.print("\n[green]✅ Training completed successfully![/green]")
             return True
-            
         except subprocess.CalledProcessError as e:
             console.print(f"\n[red]❌ Training failed with exit code {e.returncode}[/red]")
             return False
         except KeyboardInterrupt:
             console.print("\n[yellow]⏸️  Training interrupted by user[/yellow]")
-            return False
-        except Exception as e:
-            console.print(f"\n[red]❌ Unexpected error: {e}[/red]")
-            traceback.print_exc()
             return False
     
     def optimize_and_launch(
